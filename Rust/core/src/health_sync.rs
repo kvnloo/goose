@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::activity_identity::{
     ActivityIdentityInput, activity_idempotency_key as build_activity_idempotency_key,
 };
+use crate::rfc3339::{days_from_civil, days_in_month};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -441,7 +442,7 @@ fn parse_utc_instant(value: &str) -> Option<UtcInstant> {
     let (year, month, day) = parse_date(date)?;
     let (time, offset_seconds) = split_time_and_offset(time_and_offset)?;
     let (hour, minute, second, nanos) = parse_time(time)?;
-    let days = days_from_civil(year, month, day)?;
+    let days = days_from_civil(year, month, day);
     let seconds = i128::from(days) * 86_400
         + i128::from(hour) * 3_600
         + i128::from(minute) * 60
@@ -524,31 +525,8 @@ fn parse_time(value: &str) -> Option<(u32, u32, u32, u32)> {
     Some((hour, minute, second, nanos))
 }
 
-fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
-    let month_i32 = i32::try_from(month).ok()?;
-    let day_i32 = i32::try_from(day).ok()?;
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let month_prime = month_i32 + if month_i32 > 2 { -3 } else { 9 };
-    let doy = (153 * month_prime + 2) / 5 + day_i32 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(i64::from(era) * 146_097 + i64::from(doe) - 719_468)
-}
 
-fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
 
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
 
 pub fn run_health_sync_dry_run(input: &HealthSyncDryRunInput) -> HealthSyncDryRunReport {
     let mut issues = Vec::new();

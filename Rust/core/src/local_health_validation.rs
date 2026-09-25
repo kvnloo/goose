@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{GooseError, GooseResult};
+use crate::rfc3339::{civil_from_days, days_from_civil, days_in_month};
 
 pub const LOCAL_HEALTH_VALIDATION_MANIFEST_SCHEMA: &str =
     "goose.local-health-validation-manifest.v1";
@@ -3207,7 +3208,8 @@ fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     let second = time_parts.next()?.parse::<u32>().ok()?;
     if time_parts.next().is_some()
         || !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || day == 0
+        || day > days_in_month(year, month)
         || hour > 23
         || minute > 59
         || second > 60
@@ -3238,16 +3240,6 @@ fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     Some(seconds * 1_000 + millis)
 }
 
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let month = month as i32;
-    let day = day as i32;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    i64::from(era) * 146_097 + i64::from(doe) - 719_468
-}
 
 fn rfc3339_utc_from_unix_ms(unix_ms: i64) -> String {
     let seconds = unix_ms.div_euclid(1_000);
@@ -3265,16 +3257,3 @@ fn rfc3339_utc_from_unix_ms(unix_ms: i64) -> String {
     }
 }
 
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let days = days + 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let doe = days - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = year + i64::from(month <= 2);
-    (year as i32, month as u32, day as u32)
-}

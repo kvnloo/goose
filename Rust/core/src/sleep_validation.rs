@@ -34,6 +34,7 @@ use crate::{
     reference::{REFERENCE_SLEEP_ACTIGRAPHY_ID, REFERENCE_SLEEP_ACTIGRAPHY_VERSION},
     store::{GooseStore, SleepCorrectionLabelRow},
 };
+use crate::rfc3339::{civil_from_days, days_from_civil, days_in_month};
 
 pub const SLEEP_WINDOW_LABEL_VALIDATION_SCHEMA: &str =
     "goose.sleep-window-label-validation-report.v1";
@@ -6248,7 +6249,8 @@ fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     let second = second_text.parse::<u32>().ok()?;
     let millis = parse_millis_fraction(fraction_text)?;
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || day == 0
+        || day > days_in_month(year, month)
         || hour > 23
         || minute > 59
         || second > 59
@@ -6310,27 +6312,4 @@ fn default_min_benchmark_comparisons() -> usize {
     1
 }
 
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month_prime = month as i32 + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day as i32 - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    i64::from(era * 146_097 + day_of_era - 719_468)
-}
 
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let days = days + 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
-    (year as i32, month as u32, day as u32)
-}

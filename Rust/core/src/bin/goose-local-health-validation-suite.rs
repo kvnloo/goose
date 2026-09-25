@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
+use goose_core::rfc3339::{days_from_civil, days_in_month};
 
 const MANIFEST_SCHEMA: &str = "goose.local-health-validation-manifest.v1";
 const REPORT_SCHEMA: &str = "goose.local-health-validation-suite-report.v1";
@@ -4799,7 +4800,8 @@ fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     let second = time_parts.next()?.parse::<u32>().ok()?;
     if time_parts.next().is_some()
         || !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || day == 0
+        || day > days_in_month(year, month)
         || hour > 23
         || minute > 59
         || second > 60
@@ -4830,16 +4832,6 @@ fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     Some(seconds * 1_000 + millis)
 }
 
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let month = month as i32;
-    let day = day as i32;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    i64::from(era) * 146_097 + i64::from(doe) - 719_468
-}
 
 fn has_official_labels(case: &LocalHealthValidationCase) -> bool {
     case.official_whoop_step_delta.is_some()

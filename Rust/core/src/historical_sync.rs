@@ -8,6 +8,7 @@
 //! idle with `AbortHistoricalTransmits`.
 
 use serde::{Deserialize, Serialize};
+use crate::rfc3339::{days_from_civil, days_in_month};
 
 pub const HISTORICAL_SYNC_DRY_RUN_SCHEMA: &str = "goose.historical-sync-dry-run.v1";
 pub const HISTORICAL_SYNC_DRY_RUN_REPORT_SCHEMA: &str = "goose.historical-sync-dry-run-report.v1";
@@ -1960,7 +1961,8 @@ fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     let second = second_text.parse::<u32>().ok()?;
     let millis = parse_millis_fraction(fraction_text)?;
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || day == 0
+        || day > days_in_month(year, month)
         || hour > 23
         || minute > 59
         || second > 59
@@ -1994,15 +1996,6 @@ fn parse_millis_fraction(value: &str) -> Option<u32> {
     Some(millis)
 }
 
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month_prime = month as i32 + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day as i32 - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    i64::from(era * 146_097 + day_of_era - 719_468)
-}
 
 fn normalize_uuid(value: &str) -> String {
     value

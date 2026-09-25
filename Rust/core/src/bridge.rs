@@ -124,6 +124,7 @@ use crate::{
         rollup_resting_heart_rate_day_for_store, validate_resting_heart_rate_capture_for_store,
     },
     reference::reference_algorithm_definitions,
+    rfc3339::{days_from_civil, days_in_month},
     sleep_validation::{
         SleepStageLabelValidationOptions, SleepV1EvidenceFolderOptions,
         SleepV1ExplanationStabilityOptions, SleepV1ReleaseGateInput,
@@ -4838,31 +4839,6 @@ fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     Some((days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64) * 1_000)
 }
 
-fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year as i64 - i64::from(month <= 2);
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month = month as i64;
-    let day = day as i64;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
 fn typical_minute_of_day(values: &mut [f64]) -> f64 {
     values.sort_by(|left, right| left.total_cmp(right));
     values
@@ -6651,14 +6627,15 @@ fn capture_arrival_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     let second = second_text.parse::<u32>().ok()?;
     let millis = capture_arrival_millis_fraction(fraction_text)?;
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || day == 0
+        || day > days_in_month(year, month)
         || hour > 23
         || minute > 59
         || second > 59
     {
         return None;
     }
-    let days = capture_arrival_days_from_civil(year, month, day);
+    let days = days_from_civil(year, month, day);
     days.checked_mul(86_400_000)?
         .checked_add(i64::from(hour) * 3_600_000)?
         .checked_add(i64::from(minute) * 60_000)?
@@ -6680,16 +6657,6 @@ fn capture_arrival_millis_fraction(value: &str) -> Option<u32> {
         factor /= 10;
     }
     Some(millis)
-}
-
-fn capture_arrival_days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month_prime = month as i32 + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day as i32 - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    i64::from(era * 146_097 + day_of_era - 719_468)
 }
 
 trait CaptureArrivalProvenance {

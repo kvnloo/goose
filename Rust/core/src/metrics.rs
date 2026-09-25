@@ -7,6 +7,7 @@ use crate::{
     GooseError, GooseResult,
     store::{AlgorithmDefinitionRecord, AlgorithmPreferenceRecord, AlgorithmRunRecord},
 };
+use crate::rfc3339::{days_from_civil, days_in_month};
 
 pub const GOOSE_HRV_V0_ID: &str = "goose.hrv.v0";
 pub const GOOSE_HRV_V0_VERSION: &str = "0.1.0";
@@ -3346,30 +3347,8 @@ fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
     Some((days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64) * 1_000)
 }
 
-fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
 
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
 
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year as i64 - i64::from(month <= 2);
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month = month as i64;
-    let day = day as i64;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
 
 fn require_finite_positive(name: &str, value: f64, errors: &mut Vec<String>) {
     if !value.is_finite() || value <= 0.0 {

@@ -7,6 +7,7 @@ use crate::{
     GooseError, GooseResult,
     fixtures::{CAPTURED_FRAME_BATCH_SCHEMA, FRAME_HEX_SCHEMA, FixtureIndexReport, IndexedFixture},
     protocol::{DeviceType, decode_hex_with_whitespace, parse_frame},
+    rfc3339::{days_from_civil, days_in_month},
     store::{
         CaptureSessionInput, DEFAULT_RAW_EVIDENCE_PAYLOAD_RETENTION_LIMIT_BYTES, DecodedFrameInput,
         GooseStore, RawEvidenceInput, RawEvidencePayloadRetentionReport,
@@ -1216,8 +1217,13 @@ fn parse_capture_rfc3339_unix_ms(value: &str) -> Option<i64> {
         .split_once('.')
         .map_or((second_part, ""), |(second, fraction)| (second, fraction));
     let second = second_text.parse::<i64>().ok()?;
+    // Narrow to the shared civil-date types; absurd magnitudes are invalid input.
+    let year = i32::try_from(year).ok()?;
+    let month = u32::try_from(month).ok()?;
+    let day = u32::try_from(day).ok()?;
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || day == 0
+        || day > days_in_month(year, month)
         || !(0..=23).contains(&hour)
         || !(0..=59).contains(&minute)
         || !(0..=60).contains(&second)
@@ -1263,16 +1269,6 @@ fn parse_fraction_millis(fraction: &str) -> Option<i64> {
         digits.push('0');
     }
     digits.parse::<i64>().ok()
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = year - if month <= 2 { 1 } else { 0 };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month_prime = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
 }
 
 fn capture_import_next_actions(scope: &str, issues: &[String]) -> Vec<CaptureImportNextAction> {
@@ -1409,4 +1405,38 @@ pub fn ensure_database_parent(path: &Path) -> GooseResult<()> {
         fs::create_dir_all(parent).map_err(|source| GooseError::io(parent, source))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_impossible_calendar_dates() {
+        // Regression: the parser used to accept day 1..=31 for every month,
+        // so 2026-02-30 silently parsed as March 2 and skewed timestamp bounds.
+        assert_eq!(parse_capture_rfc3339_unix_ms("2026-02-30T00:00:00Z"), None);
+        assert_eq!(parse_capture_rfc3339_unix_ms("2026-04-31T12:00:00Z"), None);
+        assert_eq!(parse_capture_rfc3339_unix_ms("2025-02-29T00:00:00Z"), None);
+        // Leap days still parse.
+        assert!(parse_capture_rfc3339_unix_ms("2024-02-29T00:00:00Z").is_some());
+    }
+
+    #[test]
+    fn parses_valid_timestamps_with_offsets() {
+        assert_eq!(
+            parse_capture_rfc3339_unix_ms("2026-05-28T12:00:00Z"),
+            Some(1779969600000)
+        );
+        assert_eq!(
+            parse_capture_rfc3339_unix_ms("2026-05-28T14:00:00+02:00"),
+            Some(1779969600000)
+        );
+        assert_eq!(
+            parse_capture_rfc3339_unix_ms("2026-05-28T12:00:00.500Z"),
+            Some(1779969600500)
+        );
+        assert_eq!(parse_capture_rfc3339_unix_ms("not-a-timestamp"), None);
+        assert_eq!(parse_capture_rfc3339_unix_ms("2026-13-01T00:00:00Z"), None);
+    }
 }
