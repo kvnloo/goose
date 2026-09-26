@@ -1173,8 +1173,9 @@ pub fn run_metric_feature_export_reports(
         end,
         options.hrv,
     )?;
-    let metric_window = run_metric_window_feature_report(
-        &context.decoded_rows,
+    let metric_window = run_metric_window_feature_report_from_reports(
+        &heart_rate,
+        &motion,
         &context.correlation,
         start,
         end,
@@ -2156,6 +2157,30 @@ pub fn run_metric_window_feature_report(
     let heart_rate_report =
         run_heart_rate_feature_report(decoded_rows, correlation, feature_options)?;
     let motion_report = run_motion_feature_report(decoded_rows, correlation, feature_options)?;
+    run_metric_window_feature_report_from_reports(
+        &heart_rate_report,
+        &motion_report,
+        correlation,
+        start,
+        end,
+        options,
+    )
+}
+
+/// Metric-window aggregation over precomputed motion / heart-rate reports.
+///
+/// Field-identical to `run_metric_window_feature_report` whenever the reports
+/// were built from the same decoded rows, correlation, and correlation-input
+/// options. The shared export path enforces that via
+/// `metric_feature_export_options_agree_on_correlation`.
+pub fn run_metric_window_feature_report_from_reports(
+    heart_rate_report: &HeartRateFeatureReport,
+    motion_report: &MotionFeatureReport,
+    correlation: &CaptureCorrelationReport,
+    start: &str,
+    end: &str,
+    options: MetricWindowFeatureOptions,
+) -> GooseResult<MetricWindowFeatureReport> {
 
     let heart_rate_features = heart_rate_report
         .features
