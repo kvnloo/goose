@@ -1,14 +1,16 @@
 use goose_core::{
+    capture_correlation::{CaptureCorrelationOptions, run_capture_correlation_for_store},
     capture_import::{CapturedFrameBatchOptions, CapturedFrameInput, import_captured_frame_batch},
     metric_features::{
         HeartRateFeatureOptions, HrvFeatureOptions, MetricWindowFeatureOptions,
         MotionFeatureOptions, RecoveryFeatureScoreOptions, RecoverySensorDiscoveryOptions,
-        RecoverySensorWidgetDiscovery, RestingHeartRateFeatureOptions, SleepFeatureScoreOptions,
-        SleepStageKind, StrainFeatureScoreOptions, StressFeatureScoreOptions,
-        VitalEventFeatureOptions, run_heart_rate_feature_report_for_store,
-        run_hrv_feature_report_for_store, run_metric_window_feature_report_for_store,
-        run_motion_feature_report_for_store, run_recovery_feature_score_report_for_store,
-        run_recovery_sensor_discovery_report_for_store,
+        RecoverySensorWidgetDiscovery, RestingHeartRateFeatureOptions,
+        RestingHeartRateFeatureReport, SleepFeatureScoreOptions, SleepStageKind,
+        StrainFeatureScoreOptions, StressFeatureScoreOptions, VitalEventFeatureOptions,
+        run_heart_rate_feature_report_for_store, run_hrv_feature_report_for_store,
+        run_metric_window_feature_report_for_store, run_motion_feature_report_for_store,
+        run_recovery_feature_score_report_for_store,
+        run_recovery_sensor_discovery_report_for_store, run_resting_heart_rate_feature_report,
         run_resting_heart_rate_feature_report_for_store, run_sleep_feature_score_report_for_store,
         run_strain_feature_score_report_for_store, run_stress_feature_score_report_for_store,
         run_vital_event_feature_report_for_store,
@@ -3056,4 +3058,206 @@ fn assert_close(actual: f64, expected: f64) {
         (actual - expected).abs() < 1e-9,
         "expected {expected}, got {actual}"
     );
+}
+
+// --- resting heart rate nearest-motion join semantics ---
+//
+// These tests pin the exact matching semantics of the motion join inside
+// `resting_heart_rate_candidate_selection` (same-frame priority, 10-minute
+// match window, nearest by (distance, frame id)) so the indexed
+// implementation cannot silently change which heart rate samples feed the
+// resting heart rate feature.
+
+fn import_resting_k10_frame(
+    store: &GooseStore,
+    frame_id: &str,
+    captured_at: &str,
+    sample_value: i16,
+    heart_rate: u8,
+) {
+    let frames = vec![CapturedFrameInput {
+        evidence_id: format!("test.resting.{frame_id}"),
+        frame_id: Some(frame_id.to_string()),
+        source: "ios.corebluetooth.notification".to_string(),
+        captured_at: captured_at.to_string(),
+        device_model: "WHOOP 5.0 Goose".to_string(),
+        frame_hex: k10_motion_frame_hex_with_value_and_heart_rate(sample_value, heart_rate),
+        sensitivity: "user-owned-live-notification".to_string(),
+        capture_session_id: None,
+        device_type: DeviceType::Goose,
+    }];
+    let report = import_captured_frame_batch(
+        store,
+        &frames,
+        CapturedFrameBatchOptions {
+            parser_version: "goose-core/test",
+        },
+    )
+    .unwrap();
+    assert!(report.pass, "{:?}", report.issues);
+}
+
+fn import_resting_k18_hr_frame(
+    store: &GooseStore,
+    frame_id: &str,
+    captured_at: &str,
+    marker_value: u8,
+) {
+    let frames = vec![CapturedFrameInput {
+        evidence_id: format!("test.resting.{frame_id}"),
+        frame_id: Some(frame_id.to_string()),
+        source: "ios.corebluetooth.notification".to_string(),
+        captured_at: captured_at.to_string(),
+        device_model: "WHOOP 5.0 Goose".to_string(),
+        frame_hex: historical_k18_frame_hex(marker_value),
+        sensitivity: "user-owned-live-notification".to_string(),
+        capture_session_id: None,
+        device_type: DeviceType::Goose,
+    }];
+    let report = import_captured_frame_batch(
+        store,
+        &frames,
+        CapturedFrameBatchOptions {
+            parser_version: "goose-core/test",
+        },
+    )
+    .unwrap();
+    assert!(report.pass, "{:?}", report.issues);
+}
+
+fn resting_report_for_fixture(store: &GooseStore) -> RestingHeartRateFeatureReport {
+    let start = "2026-05-27T00:00:00Z";
+    let end = "2026-05-28T00:00:00Z";
+    let decoded_rows = store.decoded_frames_between(start, end).unwrap();
+    let correlation = run_capture_correlation_for_store(
+        store,
+        "test-db",
+        start,
+        end,
+        CaptureCorrelationOptions {
+            min_owned_captures_per_summary: 1,
+            require_owned_captures: false,
+        },
+    )
+    .unwrap();
+    run_resting_heart_rate_feature_report(
+        &decoded_rows,
+        &correlation,
+        start,
+        end,
+        RestingHeartRateFeatureOptions::default(),
+    )
+    .unwrap()
+}
+
+fn motion_filter_counts(report: &RestingHeartRateFeatureReport) -> (u64, u64, u64, u64) {
+    let filter = &report
+        .resting
+        .as_ref()
+        .expect("expected a resting heart rate feature")
+        .provenance["motion_filter"];
+    (
+        filter["matched_heart_rate_sample_count"].as_u64().unwrap(),
+        filter["low_motion_heart_rate_sample_count"]
+            .as_u64()
+            .unwrap(),
+        filter["high_motion_heart_rate_sample_count"]
+            .as_u64()
+            .unwrap(),
+        filter["unmatched_heart_rate_sample_count"]
+            .as_u64()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn resting_heart_rate_matches_nearest_motion_sample_in_time() {
+    // The heart rate sample at 12:00 is 1 minute from the high-motion sample
+    // and 9 minutes from the low-motion sample. Nearest-in-time wins, so the
+    // sample is excluded as high-motion even though a low-motion sample is
+    // also inside the window.
+    let store = GooseStore::open_in_memory().unwrap();
+    import_resting_k18_hr_frame(&store, "hr.near", "2026-05-27T12:00:00Z", 60);
+    import_resting_k10_frame(&store, "motion.high", "2026-05-27T12:01:00Z", 20000, 0);
+    import_resting_k10_frame(&store, "motion.low", "2026-05-27T12:09:00Z", 1000, 0);
+
+    let report = resting_report_for_fixture(&store);
+    assert_eq!(report.heart_rate_feature_count, 1);
+    assert!(
+        report.resting.is_none(),
+        "expected the high-motion match to exclude the sample"
+    );
+}
+
+#[test]
+fn resting_heart_rate_match_window_edge_is_inclusive() {
+    // A motion sample exactly 10 minutes away (the documented match window)
+    // still matches; one second past it does not.
+    let store = GooseStore::open_in_memory().unwrap();
+    import_resting_k18_hr_frame(&store, "hr.edge", "2026-05-27T12:00:00Z", 61);
+    import_resting_k10_frame(&store, "motion.edge", "2026-05-27T12:10:00Z", 1000, 0);
+
+    let report = resting_report_for_fixture(&store);
+    let resting = report.resting.as_ref().expect("expected a resting feature");
+    assert_close(resting.resting_hr_bpm, 61.0);
+    assert_eq!(motion_filter_counts(&report), (1, 1, 0, 0));
+
+    let store = GooseStore::open_in_memory().unwrap();
+    import_resting_k18_hr_frame(&store, "hr.outside", "2026-05-27T12:00:00Z", 61);
+    import_resting_k10_frame(&store, "motion.outside", "2026-05-27T12:10:01Z", 1000, 0);
+
+    let report = resting_report_for_fixture(&store);
+    let resting = report.resting.as_ref().expect("expected a resting feature");
+    assert_close(resting.resting_hr_bpm, 61.0);
+    assert!(
+        resting
+            .quality_flags
+            .iter()
+            .any(|flag| flag == "resting_hr_motion_context_partial")
+    );
+    let filter = &resting.provenance["motion_filter"];
+    assert_eq!(
+        filter["matched_heart_rate_sample_count"].as_u64().unwrap(),
+        0
+    );
+    assert_eq!(
+        filter["unmatched_heart_rate_sample_count"]
+            .as_u64()
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn resting_heart_rate_motion_tie_breaks_by_frame_id() {
+    // Both motion samples are exactly 5 minutes away. The tie breaks by
+    // frame id, so "tie.high" wins over "tie.low" and the high-motion match
+    // excludes the sample.
+    let store = GooseStore::open_in_memory().unwrap();
+    import_resting_k18_hr_frame(&store, "hr.tie", "2026-05-27T12:00:00Z", 62);
+    import_resting_k10_frame(&store, "tie.high", "2026-05-27T11:55:00Z", 20000, 0);
+    import_resting_k10_frame(&store, "tie.low", "2026-05-27T12:05:00Z", 1000, 0);
+
+    let report = resting_report_for_fixture(&store);
+    assert_eq!(report.heart_rate_feature_count, 1);
+    assert!(
+        report.resting.is_none(),
+        "expected the frame-id tie-break to select the high-motion sample"
+    );
+}
+
+#[test]
+fn resting_heart_rate_same_frame_match_beats_time_based_match() {
+    // The K10 frame carries both the motion feature and the heart rate
+    // feature under one frame id. A different high-motion sample sits at the
+    // same timestamp with a smaller frame id, so a pure time-based minimum
+    // would pick it; the same-frame fast path must win instead.
+    let store = GooseStore::open_in_memory().unwrap();
+    import_resting_k10_frame(&store, "sf.motion", "2026-05-27T12:00:00Z", 1000, 72);
+    import_resting_k10_frame(&store, "a.zero", "2026-05-27T12:00:00Z", 20000, 0);
+
+    let report = resting_report_for_fixture(&store);
+    let resting = report.resting.as_ref().expect("expected a resting feature");
+    assert_close(resting.resting_hr_bpm, 72.0);
+    assert_eq!(motion_filter_counts(&report), (1, 1, 0, 0));
 }

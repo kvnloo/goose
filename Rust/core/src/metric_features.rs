@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -6033,8 +6033,9 @@ fn resting_heart_rate_candidate_selection<'a>(
     let mut matched_heart_rate_sample_count = 0usize;
     let mut high_motion_heart_rate_sample_count = 0usize;
 
+    let motion_index = resting_motion_index(motion_features);
     for feature in heart_rate_features {
-        match nearest_resting_motion_feature(feature, motion_features) {
+        match nearest_resting_motion_feature(feature, &motion_index) {
             Some(motion) => {
                 matched_heart_rate_sample_count += 1;
                 if motion.motion_intensity_0_to_1 <= RESTING_HR_LOW_MOTION_INTENSITY_MAX {
@@ -6187,29 +6188,71 @@ fn resting_heart_rate_feature(
     })
 }
 
+/// Index over motion features for the resting heart rate candidate join.
+///
+/// The unindexed scan in `nearest_resting_motion_feature` compared every
+/// heart rate feature against every motion feature (O(H x M)). The index
+/// answers the same query in O(log M + window) with identical results:
+/// - `by_frame_id` keeps the first motion feature per frame id in the
+///   original order, matching the old linear `.find`.
+/// - `by_time` holds (sample time, original index, feature) for every motion
+///   feature with a known sample time, sorted by (time, index). The window
+///   scan minimizes (distance, frame id, original index); the trailing index
+///   reproduces the old "first minimum in original order" tie-break exactly.
+struct RestingMotionIndex<'a> {
+    by_frame_id: HashMap<&'a str, &'a MotionFeature>,
+    by_time: Vec<(i64, usize, &'a MotionFeature)>,
+}
+
+fn resting_motion_index<'a>(motion_features: &[&'a MotionFeature]) -> RestingMotionIndex<'a> {
+    let mut by_frame_id = HashMap::with_capacity(motion_features.len());
+    let mut by_time = Vec::with_capacity(motion_features.len());
+    for (index, motion) in motion_features.iter().enumerate() {
+        by_frame_id
+            .entry(motion.frame_id.as_str())
+            .or_insert(*motion);
+        if let Some(sample_time) = feature_time_unix_ms(motion) {
+            by_time.push((sample_time, index, *motion));
+        }
+    }
+    by_time.sort_by_key(|entry| (entry.0, entry.1));
+    RestingMotionIndex {
+        by_frame_id,
+        by_time,
+    }
+}
+
 fn nearest_resting_motion_feature<'a>(
     heart_rate_feature: &HeartRateFeature,
-    motion_features: &[&'a MotionFeature],
+    index: &RestingMotionIndex<'a>,
 ) -> Option<&'a MotionFeature> {
-    if let Some(same_frame) = motion_features
-        .iter()
-        .copied()
-        .find(|motion| motion.frame_id == heart_rate_feature.frame_id)
-    {
-        return Some(same_frame);
+    if let Some(same_frame) = index.by_frame_id.get(heart_rate_feature.frame_id.as_str()) {
+        return Some(*same_frame);
     }
 
     let heart_rate_time = heart_rate_feature_time_unix_ms(heart_rate_feature)?;
-    motion_features
-        .iter()
-        .copied()
-        .filter_map(|motion| {
-            let motion_time = feature_time_unix_ms(motion)?;
-            let distance = (motion_time - heart_rate_time).abs();
-            (distance <= RESTING_HR_MOTION_MATCH_WINDOW_MS).then_some((distance, motion))
-        })
-        .min_by_key(|(distance, motion)| (*distance, motion.frame_id.as_str()))
-        .map(|(_, motion)| motion)
+    let window_start = heart_rate_time - RESTING_HR_MOTION_MATCH_WINDOW_MS;
+    let window_end = heart_rate_time + RESTING_HR_MOTION_MATCH_WINDOW_MS;
+    let range_start = index
+        .by_time
+        .partition_point(|entry| entry.0 < window_start);
+
+    let mut best: Option<(i64, &str, usize, &'a MotionFeature)> = None;
+    for &(motion_time, original_index, motion) in index.by_time[range_start..].iter() {
+        if motion_time > window_end {
+            break;
+        }
+        let distance = (motion_time - heart_rate_time).abs();
+        let candidate = (distance, motion.frame_id.as_str(), original_index);
+        let is_better = best
+            .as_ref()
+            .map(|current| candidate < (current.0, current.1, current.2))
+            .unwrap_or(true);
+        if is_better {
+            best = Some((distance, motion.frame_id.as_str(), original_index, motion));
+        }
+    }
+    best.map(|(_, _, _, motion)| motion)
 }
 
 fn heart_rate_source_signal_summary(features: &[&HeartRateFeature]) -> (String, Vec<String>) {
