@@ -1,7 +1,7 @@
 use goose_core::{
-    perf_budget::{DEFAULT_PERF_SCALE, PerfBudgetOptions, PerfBudgets, run_perf_budget},
+    perf_budget::{run_perf_budget, PerfBudgetOptions, PerfBudgets, DEFAULT_PERF_SCALE},
     report::write_json_report,
-    tool_args::{args, path_value, value},
+    tool_args::{args, optional_mib, optional_u64, optional_usize, path_value, InvalidWording},
 };
 
 fn main() {
@@ -13,25 +13,46 @@ fn main() {
 
 fn run() -> goose_core::GooseResult<()> {
     let args = args();
-    let scale = optional_usize(&args, "--scale")?.unwrap_or(DEFAULT_PERF_SCALE);
+    let scale =
+        optional_usize(&args, "--scale", InvalidWording::Terse)?.unwrap_or(DEFAULT_PERF_SCALE);
     let output = path_value(&args, "--output")?;
     let budgets = PerfBudgets {
-        parser_max_duration_ms: optional_u64(&args, "--max-parser-ms")?
+        parser_max_duration_ms: optional_u64(&args, "--max-parser-ms", InvalidWording::Terse)?
             .unwrap_or_else(|| PerfBudgets::default().parser_max_duration_ms),
-        deframer_max_duration_ms: optional_u64(&args, "--max-deframer-ms")?
+        deframer_max_duration_ms: optional_u64(&args, "--max-deframer-ms", InvalidWording::Terse)?
             .unwrap_or_else(|| PerfBudgets::default().deframer_max_duration_ms),
-        algorithms_max_duration_ms: optional_u64(&args, "--max-algorithms-ms")?
-            .unwrap_or_else(|| PerfBudgets::default().algorithms_max_duration_ms),
-        export_max_duration_ms: optional_u64(&args, "--max-export-ms")?
+        algorithms_max_duration_ms: optional_u64(
+            &args,
+            "--max-algorithms-ms",
+            InvalidWording::Terse,
+        )?
+        .unwrap_or_else(|| PerfBudgets::default().algorithms_max_duration_ms),
+        export_max_duration_ms: optional_u64(&args, "--max-export-ms", InvalidWording::Terse)?
             .unwrap_or_else(|| PerfBudgets::default().export_max_duration_ms),
-        parser_max_estimated_peak_bytes: optional_mib(&args, "--max-parser-mib")?
-            .unwrap_or_else(|| PerfBudgets::default().parser_max_estimated_peak_bytes),
-        deframer_max_estimated_peak_bytes: optional_mib(&args, "--max-deframer-mib")?
-            .unwrap_or_else(|| PerfBudgets::default().deframer_max_estimated_peak_bytes),
-        algorithms_max_estimated_peak_bytes: optional_mib(&args, "--max-algorithms-mib")?
-            .unwrap_or_else(|| PerfBudgets::default().algorithms_max_estimated_peak_bytes),
-        export_max_estimated_peak_bytes: optional_mib(&args, "--max-export-mib")?
-            .unwrap_or_else(|| PerfBudgets::default().export_max_estimated_peak_bytes),
+        parser_max_estimated_peak_bytes: optional_mib(
+            &args,
+            "--max-parser-mib",
+            InvalidWording::Terse,
+        )?
+        .unwrap_or_else(|| PerfBudgets::default().parser_max_estimated_peak_bytes),
+        deframer_max_estimated_peak_bytes: optional_mib(
+            &args,
+            "--max-deframer-mib",
+            InvalidWording::Terse,
+        )?
+        .unwrap_or_else(|| PerfBudgets::default().deframer_max_estimated_peak_bytes),
+        algorithms_max_estimated_peak_bytes: optional_mib(
+            &args,
+            "--max-algorithms-mib",
+            InvalidWording::Terse,
+        )?
+        .unwrap_or_else(|| PerfBudgets::default().algorithms_max_estimated_peak_bytes),
+        export_max_estimated_peak_bytes: optional_mib(
+            &args,
+            "--max-export-mib",
+            InvalidWording::Terse,
+        )?
+        .unwrap_or_else(|| PerfBudgets::default().export_max_estimated_peak_bytes),
     };
 
     let report = run_perf_budget(PerfBudgetOptions { scale, budgets })?;
@@ -41,28 +62,4 @@ fn run() -> goose_core::GooseResult<()> {
     } else {
         std::process::exit(1);
     }
-}
-
-fn optional_usize(args: &[String], name: &str) -> goose_core::GooseResult<Option<usize>> {
-    Ok(value(args, name)?
-        .map(|raw| {
-            raw.parse::<usize>().map_err(|source| {
-                goose_core::GooseError::message(format!("invalid {name}: {source}"))
-            })
-        })
-        .transpose()?)
-}
-
-fn optional_u64(args: &[String], name: &str) -> goose_core::GooseResult<Option<u64>> {
-    Ok(value(args, name)?
-        .map(|raw| {
-            raw.parse::<u64>().map_err(|source| {
-                goose_core::GooseError::message(format!("invalid {name}: {source}"))
-            })
-        })
-        .transpose()?)
-}
-
-fn optional_mib(args: &[String], name: &str) -> goose_core::GooseResult<Option<u64>> {
-    Ok(optional_u64(args, name)?.map(|value| value * 1024 * 1024))
 }

@@ -1,8 +1,8 @@
 use goose_core::{
-    GooseError,
-    bridge::{BRIDGE_REQUEST_SCHEMA, BridgeRequest, handle_bridge_request},
+    bridge::{handle_bridge_request, BridgeRequest, BRIDGE_REQUEST_SCHEMA},
     report::write_json_report,
-    tool_args::{args, flag, path_value, value},
+    tool_args::{args, flag, optional_usize, path_value, value, InvalidWording},
+    GooseError,
 };
 use serde_json::json;
 
@@ -21,7 +21,7 @@ fn run() -> goose_core::GooseResult<()> {
     let start = value(&args, "--start")?.unwrap_or_else(|| "0000".to_string());
     let end = value(&args, "--end")?.unwrap_or_else(|| "9999".to_string());
     let timezone = value(&args, "--timezone")?;
-    let min_owned_captures = optional_usize(&args, "--min-owned-captures")?;
+    let min_owned_captures = optional_usize(&args, "--min-owned-captures", InvalidWording::Terse)?;
 
     let mut request_args = json!({
         "database_path": database_path.display().to_string(),
@@ -64,13 +64,4 @@ fn run() -> goose_core::GooseResult<()> {
     } else {
         std::process::exit(1);
     }
-}
-
-fn optional_usize(args: &[String], name: &str) -> goose_core::GooseResult<Option<usize>> {
-    Ok(value(args, name)?
-        .map(|raw| {
-            raw.parse::<usize>()
-                .map_err(|source| GooseError::message(format!("invalid {name}: {source}")))
-        })
-        .transpose()?)
 }

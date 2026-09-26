@@ -1,13 +1,13 @@
 use std::{fs, path::Path};
 
 use goose_core::{
-    GooseError,
     metrics::SleepV1Input,
     report::write_json_report,
     sleep_validation::{
-        SleepV1ExplanationStabilityOptions, validate_sleep_v1_explanation_and_stability,
+        validate_sleep_v1_explanation_and_stability, SleepV1ExplanationStabilityOptions,
     },
-    tool_args::{args, path_value, value},
+    tool_args::{args, optional_usize, path_value, value, InvalidWording},
+    GooseError,
 };
 
 fn main() {
@@ -39,11 +39,16 @@ fn run() -> goose_core::GooseResult<()> {
                 "--perturb-sleep-duration-minutes",
             )?
             .unwrap_or(defaults.perturb_sleep_duration_minutes),
-            min_v1_component_count: optional_usize(&args, "--min-v1-component-count")?
-                .unwrap_or(defaults.min_v1_component_count),
+            min_v1_component_count: optional_usize(
+                &args,
+                "--min-v1-component-count",
+                InvalidWording::WithValue,
+            )?
+            .unwrap_or(defaults.min_v1_component_count),
             min_explanation_quality_signal_count: optional_usize(
                 &args,
                 "--min-explanation-quality-signal-count",
+                InvalidWording::WithValue,
             )?
             .unwrap_or(defaults.min_explanation_quality_signal_count),
         },
@@ -59,14 +64,6 @@ fn run() -> goose_core::GooseResult<()> {
 fn optional_f64(args: &[String], name: &str) -> goose_core::GooseResult<Option<f64>> {
     value(args, name)?.map_or(Ok(None), |raw| {
         raw.parse::<f64>()
-            .map(Some)
-            .map_err(|error| GooseError::message(format!("invalid {name} value {raw}: {error}")))
-    })
-}
-
-fn optional_usize(args: &[String], name: &str) -> goose_core::GooseResult<Option<usize>> {
-    value(args, name)?.map_or(Ok(None), |raw| {
-        raw.parse::<usize>()
             .map(Some)
             .map_err(|error| GooseError::message(format!("invalid {name} value {raw}: {error}")))
     })

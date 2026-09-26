@@ -1,10 +1,10 @@
 use goose_core::{
     capture_correlation::{
-        CaptureCorrelationOptions, DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY, run_capture_correlation,
+        run_capture_correlation, CaptureCorrelationOptions, DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY,
     },
     fixtures::{build_fixture_index, load_fixture_index},
     report::write_json_report,
-    tool_args::{args, default_path, flag, path_value, value},
+    tool_args::{args, default_path, flag, optional_usize, path_value, InvalidWording},
 };
 
 fn main() {
@@ -19,8 +19,9 @@ fn run() -> goose_core::GooseResult<()> {
     let fixtures = default_path(&args, "--fixtures", "fixtures")?;
     let index_path = path_value(&args, "--index")?;
     let output = path_value(&args, "--output")?;
-    let min_owned_captures_per_summary = optional_usize(&args, "--min-owned-captures")?
-        .unwrap_or(DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY);
+    let min_owned_captures_per_summary =
+        optional_usize(&args, "--min-owned-captures", InvalidWording::Terse)?
+            .unwrap_or(DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY);
     let require_owned_captures = flag(&args, "--require-owned-captures");
 
     let index = match index_path {
@@ -41,14 +42,4 @@ fn run() -> goose_core::GooseResult<()> {
     } else {
         std::process::exit(1);
     }
-}
-
-fn optional_usize(args: &[String], name: &str) -> goose_core::GooseResult<Option<usize>> {
-    Ok(value(args, name)?
-        .map(|raw| {
-            raw.parse::<usize>().map_err(|source| {
-                goose_core::GooseError::message(format!("invalid {name}: {source}"))
-            })
-        })
-        .transpose()?)
 }

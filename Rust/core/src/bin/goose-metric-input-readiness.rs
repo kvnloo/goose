@@ -1,15 +1,15 @@
 use std::fs;
 
 use goose_core::{
-    GooseError,
     capture_correlation::{
-        CaptureCorrelationOptions, CaptureCorrelationReport,
-        DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY, run_capture_correlation_for_store,
+        run_capture_correlation_for_store, CaptureCorrelationOptions, CaptureCorrelationReport,
+        DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY,
     },
-    metric_readiness::{MetricInputReadinessOptions, run_metric_input_readiness},
+    metric_readiness::{run_metric_input_readiness, MetricInputReadinessOptions},
     report::write_json_report,
     store::GooseStore,
-    tool_args::{args, flag, path_value, value},
+    tool_args::{args, flag, optional_usize, path_value, value, InvalidWording},
+    GooseError,
 };
 
 fn main() {
@@ -36,8 +36,12 @@ fn run() -> goose_core::GooseResult<()> {
             &value(&args, "--start")?.unwrap_or_else(|| "0000".to_string()),
             &value(&args, "--end")?.unwrap_or_else(|| "9999".to_string()),
             CaptureCorrelationOptions {
-                min_owned_captures_per_summary: optional_usize(&args, "--min-owned-captures")?
-                    .unwrap_or(DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY),
+                min_owned_captures_per_summary: optional_usize(
+                    &args,
+                    "--min-owned-captures",
+                    InvalidWording::Terse,
+                )?
+                .unwrap_or(DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY),
                 require_owned_captures: flag(&args, "--require-owned-captures"),
             },
         )?
@@ -56,13 +60,4 @@ fn run() -> goose_core::GooseResult<()> {
     } else {
         std::process::exit(1);
     }
-}
-
-fn optional_usize(args: &[String], name: &str) -> goose_core::GooseResult<Option<usize>> {
-    Ok(value(args, name)?
-        .map(|raw| {
-            raw.parse::<usize>()
-                .map_err(|source| GooseError::message(format!("invalid {name}: {source}")))
-        })
-        .transpose()?)
 }

@@ -1,14 +1,14 @@
 use std::path::Path;
 
 use goose_core::{
-    GooseError,
     report::write_json_report,
     sleep_validation::{
-        SLEEP_WINDOW_LABEL_VALIDATION_INPUT_SCHEMA, SleepWindowLabelValidationEvidenceInput,
-        SleepWindowLabelValidationOptions, run_sleep_window_label_validation_for_store,
+        run_sleep_window_label_validation_for_store, SleepWindowLabelValidationEvidenceInput,
+        SleepWindowLabelValidationOptions, SLEEP_WINDOW_LABEL_VALIDATION_INPUT_SCHEMA,
     },
     store::GooseStore,
-    tool_args::{args, flag, path_value, value},
+    tool_args::{args, flag, optional_usize, path_value, value, InvalidWording},
+    GooseError,
 };
 
 fn main() {
@@ -33,8 +33,12 @@ fn run() -> goose_core::GooseResult<()> {
     let input_output = path_value(&args, "--input-output")?;
     let defaults = SleepWindowLabelValidationOptions::default();
     let options = SleepWindowLabelValidationOptions {
-        min_owned_captures_per_summary: optional_usize(&args, "--min-owned-captures")?
-            .unwrap_or(defaults.min_owned_captures_per_summary),
+        min_owned_captures_per_summary: optional_usize(
+            &args,
+            "--min-owned-captures",
+            InvalidWording::WithValue,
+        )?
+        .unwrap_or(defaults.min_owned_captures_per_summary),
         require_trusted_evidence: flag(&args, "--require-trusted-evidence"),
         sleep_need_minutes: optional_f64(&args, "--sleep-need-minutes")?
             .unwrap_or(defaults.sleep_need_minutes),
@@ -79,14 +83,6 @@ fn run() -> goose_core::GooseResult<()> {
 fn optional_f64(args: &[String], name: &str) -> goose_core::GooseResult<Option<f64>> {
     value(args, name)?.map_or(Ok(None), |raw| {
         raw.parse::<f64>()
-            .map(Some)
-            .map_err(|error| GooseError::message(format!("invalid {name} value {raw}: {error}")))
-    })
-}
-
-fn optional_usize(args: &[String], name: &str) -> goose_core::GooseResult<Option<usize>> {
-    value(args, name)?.map_or(Ok(None), |raw| {
-        raw.parse::<usize>()
             .map(Some)
             .map_err(|error| GooseError::message(format!("invalid {name} value {raw}: {error}")))
     })

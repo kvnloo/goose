@@ -1,15 +1,16 @@
 use std::{fs, path::Path};
 
 use goose_core::{
-    GooseError,
     algorithm_compare::AlgorithmComparisonReport,
     historical_sync::HistoricalSyncPhysicalValidationReport,
     report::write_json_report,
     sleep_validation::{
-        SleepStageLabelValidationReport, SleepV1ExplanationStabilityReport,
-        SleepV1ReleaseGateInput, SleepWindowLabelValidationReport, validate_sleep_v1_release_gates,
+        validate_sleep_v1_release_gates, SleepStageLabelValidationReport,
+        SleepV1ExplanationStabilityReport, SleepV1ReleaseGateInput,
+        SleepWindowLabelValidationReport,
     },
-    tool_args::{args, path_value, value},
+    tool_args::{args, optional_usize, path_value, value, InvalidWording},
+    GooseError,
 };
 
 fn main() {
@@ -64,12 +65,21 @@ fn release_gate_input_from_report_paths(
         min_hand_reviewed_window_comparisons: optional_usize(
             args,
             "--min-hand-reviewed-window-comparisons",
+            InvalidWording::WithValue,
         )?
         .unwrap_or(defaults.min_hand_reviewed_window_comparisons),
-        min_stage_label_comparisons: optional_usize(args, "--min-stage-label-comparisons")?
-            .unwrap_or(defaults.min_stage_label_comparisons),
-        min_benchmark_comparisons: optional_usize(args, "--min-benchmark-comparisons")?
-            .unwrap_or(defaults.min_benchmark_comparisons),
+        min_stage_label_comparisons: optional_usize(
+            args,
+            "--min-stage-label-comparisons",
+            InvalidWording::WithValue,
+        )?
+        .unwrap_or(defaults.min_stage_label_comparisons),
+        min_benchmark_comparisons: optional_usize(
+            args,
+            "--min-benchmark-comparisons",
+            InvalidWording::WithValue,
+        )?
+        .unwrap_or(defaults.min_benchmark_comparisons),
     })
 }
 
@@ -90,14 +100,6 @@ fn benchmark_reports(args: &[String]) -> goose_core::GooseResult<Vec<AlgorithmCo
         .filter(|path| !path.is_empty())
         .map(|path| read_json(Path::new(path)))
         .collect()
-}
-
-fn optional_usize(args: &[String], name: &str) -> goose_core::GooseResult<Option<usize>> {
-    value(args, name)?.map_or(Ok(None), |raw| {
-        raw.parse::<usize>()
-            .map(Some)
-            .map_err(|error| GooseError::message(format!("invalid {name} value {raw}: {error}")))
-    })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> goose_core::GooseResult<T> {
