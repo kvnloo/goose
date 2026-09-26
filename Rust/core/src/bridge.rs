@@ -4803,64 +4803,7 @@ fn rfc3339_minute_of_day(value: &str) -> Option<f64> {
 }
 
 fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
-    let value = value.strip_suffix('Z')?;
-    let (date, time) = value.split_once('T')?;
-    let mut date_parts = date.split('-');
-    let year = date_parts.next()?.parse::<i32>().ok()?;
-    let month = date_parts.next()?.parse::<u32>().ok()?;
-    let day = date_parts.next()?.parse::<u32>().ok()?;
-    if date_parts.next().is_some() {
-        return None;
-    }
-    let mut time_parts = time.split(':');
-    let hour = time_parts.next()?.parse::<u32>().ok()?;
-    let minute = time_parts.next()?.parse::<u32>().ok()?;
-    let seconds_part = time_parts.next()?;
-    if time_parts.next().is_some() {
-        return None;
-    }
-    let second = seconds_part
-        .split_once('.')
-        .map(|(second, _)| second)
-        .unwrap_or(seconds_part)
-        .parse::<u32>()
-        .ok()?;
-    if !(1..=12).contains(&month)
-        || day == 0
-        || day > days_in_month(year, month)
-        || hour >= 24
-        || minute >= 60
-        || second >= 60
-    {
-        return None;
-    }
-    let days = days_from_civil(year, month, day);
-    Some((days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64) * 1_000)
-}
-
-fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year as i64 - i64::from(month <= 2);
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month = month as i64;
-    let day = day as i64;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
+    crate::rfc3339::parse_rfc3339_utc_unix_ms(value, crate::rfc3339::RFC3339_MS_TRUNCATE)
 }
 
 fn typical_minute_of_day(values: &mut [f64]) -> f64 {
@@ -6627,69 +6570,7 @@ fn capture_arrival_window_unix_ms(start: &str, end: &str) -> Option<(i64, i64)> 
 }
 
 fn capture_arrival_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
-    let value = value.strip_suffix('Z')?;
-    let (date, time) = value.split_once('T')?;
-    let mut date_parts = date.split('-');
-    let year = date_parts.next()?.parse::<i32>().ok()?;
-    let month = date_parts.next()?.parse::<u32>().ok()?;
-    let day = date_parts.next()?.parse::<u32>().ok()?;
-    if date_parts.next().is_some() {
-        return None;
-    }
-    let mut time_parts = time.split(':');
-    let hour = time_parts.next()?.parse::<u32>().ok()?;
-    let minute = time_parts.next()?.parse::<u32>().ok()?;
-    let seconds_part = time_parts.next()?;
-    if time_parts.next().is_some() {
-        return None;
-    }
-    let (second_text, fraction_text) = seconds_part
-        .split_once('.')
-        .map_or((seconds_part, ""), |(seconds, fraction)| {
-            (seconds, fraction)
-        });
-    let second = second_text.parse::<u32>().ok()?;
-    let millis = capture_arrival_millis_fraction(fraction_text)?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    let days = capture_arrival_days_from_civil(year, month, day);
-    days.checked_mul(86_400_000)?
-        .checked_add(i64::from(hour) * 3_600_000)?
-        .checked_add(i64::from(minute) * 60_000)?
-        .checked_add(i64::from(second) * 1_000)?
-        .checked_add(i64::from(millis))
-}
-
-fn capture_arrival_millis_fraction(value: &str) -> Option<u32> {
-    if value.is_empty() {
-        return Some(0);
-    }
-    if !value.chars().all(|character| character.is_ascii_digit()) {
-        return None;
-    }
-    let mut millis = 0_u32;
-    let mut factor = 100_u32;
-    for character in value.chars().take(3) {
-        millis += character.to_digit(10)? * factor;
-        factor /= 10;
-    }
-    Some(millis)
-}
-
-fn capture_arrival_days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month_prime = month as i32 + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day as i32 - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    i64::from(era * 146_097 + day_of_era - 719_468)
+    crate::rfc3339::parse_rfc3339_utc_unix_ms(value, crate::rfc3339::RFC3339_MS_STRICT)
 }
 
 trait CaptureArrivalProvenance {

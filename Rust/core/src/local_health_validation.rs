@@ -3189,64 +3189,7 @@ fn rfc3339_duration_ms(start: &str, end: &str) -> Option<i64> {
 }
 
 fn parse_rfc3339_utc_unix_ms(value: &str) -> Option<i64> {
-    let value = value.trim();
-    let date_time = value.strip_suffix('Z')?;
-    let (date, time) = date_time.split_once('T')?;
-    let mut date_parts = date.split('-');
-    let year = date_parts.next()?.parse::<i32>().ok()?;
-    let month = date_parts.next()?.parse::<u32>().ok()?;
-    let day = date_parts.next()?.parse::<u32>().ok()?;
-    if date_parts.next().is_some() {
-        return None;
-    }
-
-    let (time_main, fraction) = time.split_once('.').unwrap_or((time, ""));
-    let mut time_parts = time_main.split(':');
-    let hour = time_parts.next()?.parse::<u32>().ok()?;
-    let minute = time_parts.next()?.parse::<u32>().ok()?;
-    let second = time_parts.next()?.parse::<u32>().ok()?;
-    if time_parts.next().is_some()
-        || !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 60
-    {
-        return None;
-    }
-
-    let millis = if fraction.is_empty() {
-        0
-    } else {
-        let digits = fraction
-            .chars()
-            .take_while(|character| character.is_ascii_digit())
-            .take(3)
-            .collect::<String>();
-        if digits.is_empty() {
-            0
-        } else {
-            format!("{digits:0<3}").parse::<i64>().ok()?
-        }
-    };
-
-    let days = days_from_civil(year, month, day);
-    let seconds = days * 86_400
-        + i64::from(hour) * 3_600
-        + i64::from(minute) * 60
-        + i64::from(second.min(59));
-    Some(seconds * 1_000 + millis)
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let month = month as i32;
-    let day = day as i32;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    i64::from(era) * 146_097 + i64::from(doe) - 719_468
+    crate::rfc3339::parse_rfc3339_utc_unix_ms(value, crate::rfc3339::RFC3339_MS_LENIENT)
 }
 
 fn rfc3339_utc_from_unix_ms(unix_ms: i64) -> String {
@@ -3257,24 +3200,10 @@ fn rfc3339_utc_from_unix_ms(unix_ms: i64) -> String {
     let hour = second_of_day / 3_600;
     let minute = (second_of_day % 3_600) / 60;
     let second = second_of_day % 60;
-    let (year, month, day) = civil_from_days(days);
+    let (year, month, day) = crate::rfc3339::civil_from_days(days);
     if millis == 0 {
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
     } else {
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
     }
-}
-
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let days = days + 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let doe = days - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = year + i64::from(month <= 2);
-    (year as i32, month as u32, day as u32)
 }
