@@ -15,12 +15,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 use crate::{
     GooseError, GooseResult,
     metric_features::{
-        HeartRateFeatureOptions, HrvFeatureOptions, MetricWindowFeatureOptions,
-        MotionFeatureOptions, RestingHeartRateFeatureOptions, SleepFeatureScoreOptions,
-        VitalEventFeatureOptions, run_heart_rate_feature_report_for_store,
-        run_hrv_feature_report_for_store, run_metric_window_feature_report_for_store,
-        run_motion_feature_report_for_store, run_resting_heart_rate_feature_report_for_store,
-        run_sleep_feature_score_report_for_store, run_vital_event_feature_report_for_store,
+        MetricFeatureExportOptions, run_metric_feature_export_for_store,
     },
     protocol::{
         DataPacketBodySummary, I16SeriesSummary, ParsedPayload, decode_hex_with_whitespace,
@@ -2668,97 +2663,32 @@ fn export_metric_feature_reports(
     start: &str,
     end: &str,
 ) -> GooseResult<Vec<ExportMetricFeatureReportRow>> {
+    // Shared-compute export: one decoded fetch, one raw-evidence fetch, one
+    // capture-correlation pass, then fan out to the seven pure runners. The
+    // resting and sleep cores receive the precomputed motion / heart-rate
+    // reports instead of recomputing them.
+    let options = MetricFeatureExportOptions::default();
+    let reports =
+        run_metric_feature_export_for_store(store, evidence_scope, start, end, &options)?;
     let mut rows = Vec::new();
-    push_metric_feature_report(
-        &mut rows,
-        "motion",
-        start,
-        end,
-        run_motion_feature_report_for_store(
-            store,
-            evidence_scope,
-            start,
-            end,
-            MotionFeatureOptions::default(),
-        )?,
-    )?;
-    push_metric_feature_report(
-        &mut rows,
-        "heart_rate",
-        start,
-        end,
-        run_heart_rate_feature_report_for_store(
-            store,
-            evidence_scope,
-            start,
-            end,
-            HeartRateFeatureOptions::default(),
-        )?,
-    )?;
-    push_metric_feature_report(
-        &mut rows,
-        "vital_event",
-        start,
-        end,
-        run_vital_event_feature_report_for_store(
-            store,
-            evidence_scope,
-            start,
-            end,
-            VitalEventFeatureOptions::default(),
-        )?,
-    )?;
-    push_metric_feature_report(
-        &mut rows,
-        "hrv",
-        start,
-        end,
-        run_hrv_feature_report_for_store(
-            store,
-            evidence_scope,
-            start,
-            end,
-            HrvFeatureOptions::default(),
-        )?,
-    )?;
-    push_metric_feature_report(
-        &mut rows,
-        "metric_window",
-        start,
-        end,
-        run_metric_window_feature_report_for_store(
-            store,
-            evidence_scope,
-            start,
-            end,
-            MetricWindowFeatureOptions::default(),
-        )?,
-    )?;
+    push_metric_feature_report(&mut rows, "motion", start, end, reports.motion)?;
+    push_metric_feature_report(&mut rows, "heart_rate", start, end, reports.heart_rate)?;
+    push_metric_feature_report(&mut rows, "vital_event", start, end, reports.vital_event)?;
+    push_metric_feature_report(&mut rows, "hrv", start, end, reports.hrv)?;
+    push_metric_feature_report(&mut rows, "metric_window", start, end, reports.metric_window)?;
     push_metric_feature_report(
         &mut rows,
         "resting_heart_rate",
         start,
         end,
-        run_resting_heart_rate_feature_report_for_store(
-            store,
-            evidence_scope,
-            start,
-            end,
-            RestingHeartRateFeatureOptions::default(),
-        )?,
+        reports.resting_heart_rate,
     )?;
     push_metric_feature_report(
         &mut rows,
         "sleep_score_from_features",
         start,
         end,
-        run_sleep_feature_score_report_for_store(
-            store,
-            evidence_scope,
-            start,
-            end,
-            SleepFeatureScoreOptions::default(),
-        )?,
+        reports.sleep_score,
     )?;
     Ok(rows)
 }

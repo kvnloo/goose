@@ -1070,6 +1070,206 @@ struct NormalizedSampleTime {
     source: String,
 }
 
+// ---------------------------------------------------------------------------
+// Shared-compute export path.
+//
+// `export_metric_feature_reports` used to call the seven `*_for_store`
+// runners in sequence; each one re-ran `decoded_frames_between` plus a full
+// capture-correlation pass (raw fetch + serde_json re-parse of every row),
+// and the resting runner recomputed the heart-rate and motion reports while
+// the sleep runner recomputed the motion and heart-rate reports again on top.
+// This section computes each input ONCE and fans the results out to the pure
+// `(decoded_rows, correlation, options)` cores, so the seven reports stay
+// field-identical to the fan-out path while the redundant work disappears.
+// ---------------------------------------------------------------------------
+
+/// Inputs computed once for the whole metric-feature export.
+#[derive(Debug, Clone)]
+pub struct MetricFeatureExportContext {
+    pub decoded_rows: Vec<DecodedFrameRow>,
+    pub correlation: CaptureCorrelationReport,
+}
+
+/// Options for the seven export runners side by side, so the shared path can
+/// hand each runner exactly what the fan-out path would have used.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MetricFeatureExportOptions {
+    pub motion: MotionFeatureOptions,
+    pub heart_rate: HeartRateFeatureOptions,
+    pub vital_event: VitalEventFeatureOptions,
+    pub hrv: HrvFeatureOptions,
+    pub metric_window: MetricWindowFeatureOptions,
+    pub resting_heart_rate: RestingHeartRateFeatureOptions,
+    pub sleep_score: SleepFeatureScoreOptions,
+}
+
+/// The seven export reports in export order.
+#[derive(Debug, Clone)]
+pub struct MetricFeatureExportReports {
+    pub motion: MotionFeatureReport,
+    pub heart_rate: HeartRateFeatureReport,
+    pub vital_event: VitalEventFeatureReport,
+    pub hrv: HrvFeatureReport,
+    pub metric_window: MetricWindowFeatureReport,
+    pub resting_heart_rate: RestingHeartRateFeatureReport,
+    pub sleep_score: SleepFeatureScoreReport,
+}
+
+/// Fetch the shared inputs once: one decoded-frames fetch, one raw-evidence
+/// fetch, one capture-correlation pass.
+pub fn load_metric_feature_export_context(
+    store: &GooseStore,
+    database_path: &str,
+    start: &str,
+    end: &str,
+    correlation_options: CaptureCorrelationOptions,
+) -> GooseResult<MetricFeatureExportContext> {
+    let decoded_rows = store.decoded_frames_between(start, end)?;
+    let correlation = run_capture_correlation_for_store(
+        store,
+        database_path,
+        start,
+        end,
+        correlation_options,
+    )?;
+    Ok(MetricFeatureExportContext {
+        decoded_rows,
+        correlation,
+    })
+}
+
+/// Run all seven export runners against one shared context.
+///
+/// The motion and heart-rate reports are computed once and handed to the
+/// resting and sleep cores precomputed instead of being recomputed inside
+/// them. As long as the seven option sets agree on the correlation inputs
+/// (`min_owned_captures_per_summary` / `require_trusted_evidence`, which all
+/// defaults do), every report is field-identical to the fan-out path.
+pub fn run_metric_feature_export_reports(
+    context: &MetricFeatureExportContext,
+    start: &str,
+    end: &str,
+    options: &MetricFeatureExportOptions,
+) -> GooseResult<MetricFeatureExportReports> {
+    let motion = run_motion_feature_report(
+        &context.decoded_rows,
+        &context.correlation,
+        options.motion,
+    )?;
+    let heart_rate = run_heart_rate_feature_report(
+        &context.decoded_rows,
+        &context.correlation,
+        options.heart_rate,
+    )?;
+    let vital_event = run_vital_event_feature_report(
+        &context.decoded_rows,
+        &context.correlation,
+        options.vital_event,
+    )?;
+    let hrv = run_hrv_feature_report(
+        &context.decoded_rows,
+        &context.correlation,
+        start,
+        end,
+        options.hrv,
+    )?;
+    let metric_window = run_metric_window_feature_report(
+        &context.decoded_rows,
+        &context.correlation,
+        start,
+        end,
+        options.metric_window,
+    )?;
+    let resting_heart_rate = run_resting_heart_rate_feature_report_from_reports(
+        &context.correlation,
+        start,
+        end,
+        options.resting_heart_rate,
+        &heart_rate,
+        &motion,
+    )?;
+    let sleep_score = run_sleep_feature_score_report(
+        start,
+        end,
+        options.sleep_score,
+        motion.clone(),
+        heart_rate.clone(),
+    )?;
+    Ok(MetricFeatureExportReports {
+        motion,
+        heart_rate,
+        vital_event,
+        hrv,
+        metric_window,
+        resting_heart_rate,
+        sleep_score,
+    })
+}
+
+/// Convenience entrypoint: load the shared context, then fan out to the
+/// seven runners. The single correlation pass uses the correlation options
+/// the motion runner would derive; the caller must keep the seven option
+/// sets in agreement on those two fields (all defaults agree).
+pub fn run_metric_feature_export_for_store(
+    store: &GooseStore,
+    database_path: &str,
+    start: &str,
+    end: &str,
+    options: &MetricFeatureExportOptions,
+) -> GooseResult<MetricFeatureExportReports> {
+    debug_assert!(
+        metric_feature_export_options_agree_on_correlation(options),
+        "shared export context needs one correlation for all runners",
+    );
+    let context = load_metric_feature_export_context(
+        store,
+        database_path,
+        start,
+        end,
+        CaptureCorrelationOptions {
+            min_owned_captures_per_summary: options.motion.min_owned_captures_per_summary,
+            require_owned_captures: options.motion.require_trusted_evidence,
+        },
+    )?;
+    run_metric_feature_export_reports(&context, start, end, options)
+}
+
+fn metric_feature_export_options_agree_on_correlation(
+    options: &MetricFeatureExportOptions,
+) -> bool {
+    let pairs = [
+        (
+            options.motion.min_owned_captures_per_summary,
+            options.motion.require_trusted_evidence,
+        ),
+        (
+            options.heart_rate.min_owned_captures_per_summary,
+            options.heart_rate.require_trusted_evidence,
+        ),
+        (
+            options.vital_event.min_owned_captures_per_summary,
+            options.vital_event.require_trusted_evidence,
+        ),
+        (
+            options.hrv.min_owned_captures_per_summary,
+            options.hrv.require_trusted_evidence,
+        ),
+        (
+            options.metric_window.min_owned_captures_per_summary,
+            options.metric_window.require_trusted_evidence,
+        ),
+        (
+            options.resting_heart_rate.min_owned_captures_per_summary,
+            options.resting_heart_rate.require_trusted_evidence,
+        ),
+        (
+            options.sleep_score.min_owned_captures_per_summary,
+            options.sleep_score.require_trusted_evidence,
+        ),
+    ];
+    pairs.iter().all(|pair| *pair == pairs[0])
+}
+
 pub fn run_motion_feature_report_for_store(
     store: &GooseStore,
     database_path: &str,
@@ -2041,11 +2241,6 @@ pub fn run_resting_heart_rate_feature_report(
             require_trusted_evidence: options.require_trusted_evidence,
         },
     )?;
-    let heart_rate_features = heart_rate_report
-        .features
-        .iter()
-        .filter(|feature| !options.require_trusted_evidence || feature.trusted_metric_input)
-        .collect::<Vec<_>>();
     let motion_report = run_motion_feature_report(
         decoded_rows,
         correlation,
@@ -2054,6 +2249,33 @@ pub fn run_resting_heart_rate_feature_report(
             require_trusted_evidence: options.require_trusted_evidence,
         },
     )?;
+    run_resting_heart_rate_feature_report_from_reports(
+        correlation,
+        start,
+        end,
+        options,
+        &heart_rate_report,
+        &motion_report,
+    )
+}
+
+/// Pure resting-HR core over PRECOMPUTED heart-rate and motion reports.
+///
+/// Shared-compute entrypoint: the export path computes each feature report
+/// once and passes the results down instead of recomputing them here.
+pub fn run_resting_heart_rate_feature_report_from_reports(
+    correlation: &CaptureCorrelationReport,
+    start: &str,
+    end: &str,
+    options: RestingHeartRateFeatureOptions,
+    heart_rate_report: &HeartRateFeatureReport,
+    motion_report: &MotionFeatureReport,
+) -> GooseResult<RestingHeartRateFeatureReport> {
+    let heart_rate_features = heart_rate_report
+        .features
+        .iter()
+        .filter(|feature| !options.require_trusted_evidence || feature.trusted_metric_input)
+        .collect::<Vec<_>>();
     let motion_features = motion_report
         .features
         .iter()
@@ -2113,11 +2335,6 @@ pub fn run_sleep_feature_score_report_for_store(
             require_trusted_evidence: options.require_trusted_evidence,
         },
     )?;
-    let motion_features = motion_report
-        .features
-        .iter()
-        .filter(|feature| !options.require_trusted_evidence || feature.trusted_metric_input)
-        .collect::<Vec<_>>();
     let heart_rate_report = run_heart_rate_feature_report_for_store(
         store,
         database_path,
@@ -2128,6 +2345,26 @@ pub fn run_sleep_feature_score_report_for_store(
             require_trusted_evidence: options.require_trusted_evidence,
         },
     )?;
+    run_sleep_feature_score_report(start, end, options, motion_report, heart_rate_report)
+}
+
+/// Pure sleep-score core over PRECOMPUTED motion and heart-rate reports.
+///
+/// The reports are embedded in the output, so callers pass the exact structs
+/// the standalone runners would have produced; the shared-compute export path
+/// passes the single instances it computed once for all runners.
+pub fn run_sleep_feature_score_report(
+    start: &str,
+    end: &str,
+    options: SleepFeatureScoreOptions,
+    motion_report: MotionFeatureReport,
+    heart_rate_report: HeartRateFeatureReport,
+) -> GooseResult<SleepFeatureScoreReport> {
+    let motion_features = motion_report
+        .features
+        .iter()
+        .filter(|feature| !options.require_trusted_evidence || feature.trusted_metric_input)
+        .collect::<Vec<_>>();
     let heart_rate_features = heart_rate_report
         .features
         .iter()
