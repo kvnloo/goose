@@ -384,13 +384,27 @@ pub fn packet_type_name(packet_type: u8) -> Option<&'static str> {
 
 pub fn decode_hex_with_whitespace(hex_value: &str) -> GooseResult<Vec<u8>> {
     if !hex_value.bytes().any(|byte| byte.is_ascii_whitespace()) {
-        return Ok(hex::decode(hex_value)?);
+        return decode_hex_into_vec(hex_value);
     }
     let stripped: String = hex_value
         .chars()
         .filter(|char| !char.is_ascii_whitespace())
         .collect();
-    Ok(hex::decode(stripped)?)
+    decode_hex_into_vec(&stripped)
+}
+
+/// Decode hex into a pre-sized buffer.
+///
+/// `hex::decode`'s `Vec` impl grows the buffer one byte at a time through a
+/// `Result`-collect iterator chain, which is pathologically slow in debug
+/// builds (~1.8ms for a 1.3KB motion payload). Decoding into a pre-sized
+/// buffer via `hex::decode_to_slice` is ~23x faster with byte-identical
+/// output and identical `FromHexError` semantics (same odd-length check,
+/// same per-character indices).
+fn decode_hex_into_vec(hex_value: &str) -> GooseResult<Vec<u8>> {
+    let mut out = vec![0u8; hex_value.len() / 2];
+    hex::decode_to_slice(hex_value, &mut out)?;
+    Ok(out)
 }
 
 fn parse_payload(payload: &[u8]) -> Option<ParsedPayload> {

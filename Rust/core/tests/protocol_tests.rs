@@ -2,7 +2,8 @@ use goose_core::protocol::{
     COMMAND_GET_HELLO, DataPacketBodySummary, DeviceType, FrameAccumulator, I16SeriesSummary,
     PACKET_TYPE_COMMAND_RESPONSE, PACKET_TYPE_EVENT, PACKET_TYPE_HISTORICAL_DATA,
     PACKET_TYPE_REALTIME_DATA, PACKET_TYPE_REALTIME_RAW_DATA, ParsedPayload,
-    build_v5_command_frame, build_v5_payload_frame, parse_frame, parse_frame_hex,
+    build_v5_command_frame, build_v5_payload_frame, decode_hex_with_whitespace, parse_frame,
+    parse_frame_hex,
 };
 
 const GET_HELLO_FRAME: &str = "aa0108000001e67123019101363e5c8d";
@@ -519,4 +520,55 @@ fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
 
 fn put_i16(bytes: &mut [u8], offset: usize, value: i16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+#[test]
+fn decode_hex_with_whitespace_plain_lowercase() {
+    assert_eq!(
+        decode_hex_with_whitespace("deadbeef").unwrap(),
+        vec![0xde, 0xad, 0xbe, 0xef]
+    );
+}
+
+#[test]
+fn decode_hex_with_whitespace_mixed_case() {
+    assert_eq!(
+        decode_hex_with_whitespace("DeAdBeEf").unwrap(),
+        vec![0xde, 0xad, 0xbe, 0xef]
+    );
+}
+
+#[test]
+fn decode_hex_with_whitespace_strips_whitespace() {
+    assert_eq!(
+        decode_hex_with_whitespace("de ad\nbe\tef").unwrap(),
+        vec![0xde, 0xad, 0xbe, 0xef]
+    );
+}
+
+#[test]
+fn decode_hex_with_whitespace_rejects_odd_length() {
+    let err = decode_hex_with_whitespace("abc").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            goose_core::GooseError::Hex(hex::FromHexError::OddLength)
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn decode_hex_with_whitespace_rejects_invalid_character_with_index() {
+    let err = decode_hex_with_whitespace("deXf").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            goose_core::GooseError::Hex(hex::FromHexError::InvalidHexCharacter {
+                c: 'X',
+                index: 2
+            })
+        ),
+        "unexpected error: {err:?}"
+    );
 }
