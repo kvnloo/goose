@@ -3057,3 +3057,92 @@ fn assert_close(actual: f64, expected: f64) {
         "expected {expected}, got {actual}"
     );
 }
+
+#[test]
+fn sleep_window_report_preserves_behavior_with_denser_heart_rate_markers() {
+    // Same motion series as the wake-stages test, with a heart-rate marker
+    // every 30 minutes instead of every hour: more rows flow through the
+    // per-segment heart-rate lookup, so a regression in that path changes
+    // the values asserted below.
+    let store = GooseStore::open_in_memory().unwrap();
+    for (captured_at, sample_value) in [
+        ("2026-05-27T22:00:00Z", 10000),
+        ("2026-05-27T23:00:00Z", 1000),
+        ("2026-05-28T00:00:00Z", 1000),
+        ("2026-05-28T01:00:00Z", 10000),
+        ("2026-05-28T02:00:00Z", 1000),
+        ("2026-05-28T03:00:00Z", 1000),
+    ] {
+        import_motion_frame_at_value_without_heart_rate(
+            &store,
+            "user-owned-live-notification",
+            captured_at,
+            sample_value,
+        );
+    }
+    for (captured_at, marker_value) in [
+        ("2026-05-27T22:15:00Z", 80),
+        ("2026-05-27T22:45:00Z", 78),
+        ("2026-05-27T23:15:00Z", 65),
+        ("2026-05-27T23:45:00Z", 62),
+        ("2026-05-28T00:15:00Z", 55),
+        ("2026-05-28T00:45:00Z", 58),
+        ("2026-05-28T01:15:00Z", 75),
+        ("2026-05-28T01:45:00Z", 72),
+        ("2026-05-28T02:15:00Z", 70),
+        ("2026-05-28T02:45:00Z", 68),
+    ] {
+        import_history_frame_at(
+            &store,
+            "user-owned-live-notification",
+            marker_value,
+            captured_at,
+        );
+    }
+
+    let report = run_sleep_feature_score_report_for_store(
+        &store,
+        "test-db",
+        "2026-05-27T22:00:00Z",
+        "2026-05-28T04:00:00Z",
+        SleepFeatureScoreOptions {
+            min_owned_captures_per_summary: 1,
+            require_trusted_evidence: true,
+            sleep_need_minutes: 240.0,
+            low_motion_threshold_0_to_1: 0.05,
+            disturbance_motion_threshold_0_to_1: 0.20,
+            target_midpoint_minutes_since_midnight: 30.0,
+        },
+    )
+    .unwrap();
+
+    assert!(report.pass, "{:?}", report.issues);
+    assert_eq!(report.heart_rate_report.trusted_feature_count, 10);
+    let window = report.sleep_window.expect("expected a sleep window");
+    assert_close(window.time_in_bed_minutes, 300.0);
+    assert_close(window.sleep_duration_minutes, 180.0);
+    assert_close(window.motion_coverage_fraction, 1.0);
+    assert_close(window.heart_rate_coverage_fraction, 1.0);
+    assert_eq!(window.stage_segments.len(), 5);
+    let segment_minutes: f64 = window
+        .stage_segments
+        .iter()
+        .map(|segment| segment.duration_minutes)
+        .sum();
+    assert_close(segment_minutes, window.time_in_bed_minutes);
+    for segment in &window.stage_segments {
+        let mut sorted = segment.input_ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            &segment.input_ids, &sorted,
+            "segment input ids must stay sorted and deduplicated"
+        );
+        if segment.heart_rate_bpm.is_some() {
+            assert!(
+                segment.input_ids.len() > 2,
+                "heart-rate segments must carry heart-rate input ids"
+            );
+        }
+    }
+}
