@@ -4884,6 +4884,10 @@ fn sleep_window_feature(
     let mut large_motion_gap_count = 0usize;
     let mut largest_motion_gap_minutes = 0i64;
     let mut non_increasing_motion_interval_count = 0usize;
+    // One minute index over the sorted heart-rate features replaces the two
+    // per-segment O(M) scans below (average heart rate, segment input IDs)
+    // with contiguous slice lookups in the same sorted order.
+    let hr_minute_index = HrMinuteIndex::for_features(&timed_heart_rate_features);
     for pair in timed_features.windows(2) {
         let interval_minutes = pair[1].0 - pair[0].0;
         if interval_minutes <= 0 {
@@ -4904,8 +4908,12 @@ fn sleep_window_feature(
         if current_motion >= options.disturbance_motion_threshold_0_to_1 {
             disturbance_count += 1;
         }
-        let heart_rate_bpm =
-            average_heart_rate_for_minute_range(pair[0].0, pair[1].0, &timed_heart_rate_features);
+        let heart_rate_bpm = average_heart_rate_for_minute_range(
+            pair[0].0,
+            pair[1].0,
+            &hr_minute_index,
+            &timed_heart_rate_features,
+        );
         if interval_covered_by_motion && heart_rate_bpm.is_some() {
             heart_rate_covered_minutes += interval_minutes as f64;
         }
@@ -4936,6 +4944,7 @@ fn sleep_window_feature(
                 heart_rate_bpm,
                 pair[0].0,
                 pair[1].0,
+                &hr_minute_index,
                 &timed_heart_rate_features,
             ),
         });
@@ -5149,19 +5158,199 @@ fn sleep_window_feature(
     })
 }
 
+/// Minute-keyed index over minute-sorted heart-rate features: one entry per
+/// distinct minute pointing at the contiguous row range in the sorted slice.
+/// Per-segment lookups slice that range instead of scanning every row, in
+/// the same order the linear scan would visit them.
+struct HrMinuteIndex {
+    minutes: Vec<i64>,
+    row_ranges: Vec<(usize, usize)>,
+}
+
+impl HrMinuteIndex {
+    fn for_features<T>(timed_features: &[(i64, T)]) -> Self {
+        let mut minutes = Vec::new();
+        let mut row_ranges: Vec<(usize, usize)> = Vec::new();
+        for (row, (minute, _)) in timed_features.iter().enumerate() {
+            match minutes.last() {
+                Some(last) if *last == *minute => {
+                    row_ranges
+                        .last_mut()
+                        .expect("row ranges align with minutes")
+                        .1 = row + 1;
+                }
+                _ => {
+                    minutes.push(*minute);
+                    row_ranges.push((row, row + 1));
+                }
+            }
+        }
+        HrMinuteIndex {
+            minutes,
+            row_ranges,
+        }
+    }
+
+    /// Row range with `start_minute <= minute < end_minute`.
+    fn row_range(&self, start_minute: i64, end_minute: i64) -> (usize, usize) {
+        let first = self
+            .minutes
+            .partition_point(|minute| *minute < start_minute);
+        let end = self.minutes.partition_point(|minute| *minute < end_minute);
+        if first >= end {
+            return (0, 0);
+        }
+        (self.row_ranges[first].0, self.row_ranges[end - 1].1)
+    }
+}
+
 fn average_heart_rate_for_minute_range(
     start_minute: i64,
     end_minute: i64,
+    index: &HrMinuteIndex,
     timed_heart_rate_features: &[(i64, &HeartRateFeature)],
 ) -> Option<f64> {
-    let values = timed_heart_rate_features
+    let (first, end) = index.row_range(start_minute, end_minute);
+    let values = timed_heart_rate_features[first..end]
         .iter()
-        .filter(|(minute, _)| *minute >= start_minute && *minute < end_minute)
         .map(|(_, feature)| feature.heart_rate_bpm)
         .collect::<Vec<_>>();
     average_f64(&values)
 }
 
+#[cfg(test)]
+mod sleep_hr_minute_index_tests {
+    use super::*;
+
+    fn hr_feature(id: &str, bpm: f64) -> HeartRateFeature {
+        HeartRateFeature {
+            metric_input_id: id.to_string(),
+            frame_id: format!("f-{id}"),
+            evidence_id: format!("e-{id}"),
+            captured_at: "2026-09-01T00:00:00Z".to_string(),
+            sample_time: "2026-09-01T00:00:00Z".to_string(),
+            sample_time_unix_ms: None,
+            sample_time_source: "test".to_string(),
+            body_summary_kind: "normal_history".to_string(),
+            source_signal: "normal_history_hr_marker".to_string(),
+            heart_rate_bpm: bpm,
+            marker_offset: 0,
+            marker_value: 0,
+            device_timestamp_seconds: None,
+            device_timestamp_subseconds: None,
+            trusted_metric_input: true,
+            quality_flags: Vec::new(),
+            provenance: serde_json::json!({}),
+        }
+    }
+
+    fn motion_feature(id: &str) -> MotionFeature {
+        MotionFeature {
+            metric_input_id: id.to_string(),
+            frame_id: format!("f-{id}"),
+            evidence_id: format!("e-{id}"),
+            captured_at: "2026-09-01T00:00:00Z".to_string(),
+            sample_time: "2026-09-01T00:00:00Z".to_string(),
+            sample_time_unix_ms: None,
+            sample_time_source: "test".to_string(),
+            body_summary_kind: "raw_motion_k10".to_string(),
+            source_signal: "raw_motion_signed_i16_amplitude".to_string(),
+            scale_basis: "mean_absolute_signed_i16_div_32767".to_string(),
+            motion_intensity_0_to_1: 0.05,
+            raw_mean_abs: 0.0,
+            raw_peak_abs: 0.0,
+            parsed_sample_count: 0,
+            axis_count: 0,
+            heart_rate_bpm: None,
+            device_timestamp_seconds: None,
+            device_timestamp_subseconds: None,
+            trusted_metric_input: true,
+            quality_flags: Vec::new(),
+            provenance: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn minute_index_row_range_covers_half_open_bounds() {
+        let timed: Vec<(i64, ())> = [10, 11, 11, 12].iter().map(|m| (*m, ())).collect();
+        let index = HrMinuteIndex::for_features(&timed);
+        assert_eq!(index.row_range(10, 12), (0, 3));
+        assert_eq!(index.row_range(11, 12), (1, 3));
+        assert_eq!(index.row_range(12, 13), (3, 4));
+        assert_eq!(index.row_range(10, 13), (0, 4));
+    }
+
+    #[test]
+    fn minute_index_row_range_handles_empty_and_missing() {
+        let empty: Vec<(i64, ())> = Vec::new();
+        let index = HrMinuteIndex::for_features(&empty);
+        assert_eq!(index.row_range(0, 100), (0, 0));
+
+        let timed: Vec<(i64, ())> = [10, 30, 31].iter().map(|m| (*m, ())).collect();
+        let index = HrMinuteIndex::for_features(&timed);
+        assert_eq!(index.row_range(0, 10), (0, 0));
+        assert_eq!(index.row_range(11, 30), (0, 0));
+        assert_eq!(index.row_range(10, 31), (0, 2));
+        assert_eq!(index.row_range(32, 100), (0, 0));
+        assert_eq!(index.row_range(11, 11), (0, 0));
+        assert_eq!(index.row_range(31, 30), (0, 0));
+    }
+
+    #[test]
+    fn average_heart_rate_over_indexed_range_matches_linear_scan() {
+        let features = [
+            (10, hr_feature("h10", 60.0)),
+            (11, hr_feature("h11a", 70.0)),
+            (11, hr_feature("h11b", 80.0)),
+            (12, hr_feature("h12", 90.0)),
+        ];
+        let timed: Vec<(i64, &HeartRateFeature)> =
+            features.iter().map(|(minute, feature)| (*minute, feature)).collect();
+        let index = HrMinuteIndex::for_features(&timed);
+        // Same values the old per-segment filter would average, in the same order.
+        assert_eq!(
+            average_heart_rate_for_minute_range(10, 12, &index, &timed),
+            Some(70.0)
+        );
+        assert_eq!(
+            average_heart_rate_for_minute_range(11, 12, &index, &timed),
+            Some(75.0)
+        );
+        assert_eq!(
+            average_heart_rate_for_minute_range(12, 13, &index, &timed),
+            Some(90.0)
+        );
+        assert_eq!(
+            average_heart_rate_for_minute_range(0, 5, &index, &timed),
+            None
+        );
+        assert_eq!(
+            average_heart_rate_for_minute_range(12, 12, &index, &timed),
+            None
+        );
+    }
+
+    #[test]
+    fn segment_input_ids_collect_sorted_deduped_ids_from_index() {
+        let start = motion_feature("seg-start");
+        let end = motion_feature("seg-end");
+        let features = [
+            (11, hr_feature("h-b", 70.0)),
+            (11, hr_feature("h-a", 80.0)),
+            (11, hr_feature("seg-start", 75.0)),
+            (12, hr_feature("h-out", 90.0)),
+        ];
+        let timed: Vec<(i64, &HeartRateFeature)> =
+            features.iter().map(|(minute, feature)| (*minute, feature)).collect();
+        let index = HrMinuteIndex::for_features(&timed);
+        let ids = segment_input_ids(&start, &end, Some(75.0), 11, 12, &index, &timed);
+        assert_eq!(ids, vec!["h-a", "h-b", "seg-end", "seg-start"]);
+        let ids_no_hr = segment_input_ids(&start, &end, None, 11, 12, &index, &timed);
+        assert_eq!(ids_no_hr, vec!["seg-end", "seg-start"]);
+        let ids_empty_range = segment_input_ids(&start, &end, Some(75.0), 20, 21, &index, &timed);
+        assert_eq!(ids_empty_range, vec!["seg-end", "seg-start"]);
+    }
+}
 fn duplicate_minute_count<T>(timed_features: &[(i64, T)]) -> usize {
     let mut seen = BTreeSet::new();
     timed_features
@@ -5546,6 +5735,7 @@ fn segment_input_ids(
     heart_rate_bpm: Option<f64>,
     start_minute: i64,
     end_minute: i64,
+    index: &HrMinuteIndex,
     timed_heart_rate_features: &[(i64, &HeartRateFeature)],
 ) -> Vec<String> {
     let mut input_ids = vec![
@@ -5553,10 +5743,10 @@ fn segment_input_ids(
         end_motion.metric_input_id.clone(),
     ];
     if heart_rate_bpm.is_some() {
+        let (first, end) = index.row_range(start_minute, end_minute);
         input_ids.extend(
-            timed_heart_rate_features
+            timed_heart_rate_features[first..end]
                 .iter()
-                .filter(|(minute, _)| *minute >= start_minute && *minute < end_minute)
                 .map(|(_, feature)| feature.metric_input_id.clone()),
         );
     }
