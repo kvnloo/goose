@@ -1087,6 +1087,12 @@ struct NormalizedSampleTime {
 #[derive(Debug, Clone)]
 pub struct MetricFeatureExportContext {
     pub decoded_rows: Vec<DecodedFrameRow>,
+    /// `parsed_payload_json` parsed once per row. The capture-correlation
+    /// pass and the four base runners (motion, heart_rate, vital_event, hrv)
+    /// each used to re-parse every row's payload from scratch; they now share
+    /// this single parse. Entries are `None` for rows whose payload is not a
+    /// JSON object payload (same `Option` shape the per-row parsers return).
+    pub parsed_payloads: Vec<Option<ParsedPayload>>,
     pub correlation: CaptureCorrelationReport,
 }
 
@@ -1116,7 +1122,7 @@ pub struct MetricFeatureExportReports {
 }
 
 /// Fetch the shared inputs once: one decoded-frames fetch, one raw-evidence
-/// fetch, one capture-correlation pass.
+/// fetch, one capture-correlation pass, one payload parse.
 pub fn load_metric_feature_export_context(
     store: &GooseStore,
     database_path: &str,
@@ -1125,6 +1131,7 @@ pub fn load_metric_feature_export_context(
     correlation_options: CaptureCorrelationOptions,
 ) -> GooseResult<MetricFeatureExportContext> {
     let decoded_rows = store.decoded_frames_between(start, end)?;
+    let parsed_payloads = parse_payloads_for_rows(&decoded_rows)?;
     let correlation = run_capture_correlation_for_store(
         store,
         database_path,
@@ -1134,15 +1141,30 @@ pub fn load_metric_feature_export_context(
     )?;
     Ok(MetricFeatureExportContext {
         decoded_rows,
+        parsed_payloads,
         correlation,
     })
+}
+
+/// Parse every row's `parsed_payload_json` once, hard-erroring on invalid
+/// JSON with the exact message the per-row plan parsers produce. The export
+/// path already hard-errors on the first invalid payload (the motion runner
+/// is the first to parse), so failing here preserves the observable
+/// behavior while letting the four base runners share one parse.
+fn parse_payloads_for_rows(
+    decoded_rows: &[DecodedFrameRow],
+) -> GooseResult<Vec<Option<ParsedPayload>>> {
+    decoded_rows.iter().map(parsed_payload_from_row).collect()
 }
 
 /// Run all seven export runners against one shared context.
 ///
 /// The motion and heart-rate reports are computed once and handed to the
 /// resting and sleep cores precomputed instead of being recomputed inside
-/// them. As long as the seven option sets agree on the correlation inputs
+/// them. Every row's payload JSON is parsed once when the context loads and
+/// the four base runners (motion, heart_rate, vital_event, hrv) share that
+/// parse instead of each re-parsing the same JSON. As long as the seven
+/// option sets agree on the correlation inputs
 /// (`min_owned_captures_per_summary` / `require_trusted_evidence`, which all
 /// defaults do), every report is field-identical to the fan-out path.
 pub fn run_metric_feature_export_reports(
@@ -1151,23 +1173,27 @@ pub fn run_metric_feature_export_reports(
     end: &str,
     options: &MetricFeatureExportOptions,
 ) -> GooseResult<MetricFeatureExportReports> {
-    let motion = run_motion_feature_report(
+    let motion = run_motion_feature_report_from_parsed_payloads(
         &context.decoded_rows,
+        &context.parsed_payloads,
         &context.correlation,
         options.motion,
     )?;
-    let heart_rate = run_heart_rate_feature_report(
+    let heart_rate = run_heart_rate_feature_report_from_parsed_payloads(
         &context.decoded_rows,
+        &context.parsed_payloads,
         &context.correlation,
         options.heart_rate,
     )?;
-    let vital_event = run_vital_event_feature_report(
+    let vital_event = run_vital_event_feature_report_from_parsed_payloads(
         &context.decoded_rows,
+        &context.parsed_payloads,
         &context.correlation,
         options.vital_event,
     )?;
-    let hrv = run_hrv_feature_report(
+    let hrv = run_hrv_feature_report_from_parsed_payloads(
         &context.decoded_rows,
+        &context.parsed_payloads,
         &context.correlation,
         start,
         end,
@@ -1292,11 +1318,22 @@ pub fn run_motion_feature_report_for_store(
     run_motion_feature_report(&decoded_rows, &correlation, options)
 }
 
-pub fn run_motion_feature_report(
+/// Pure motion core over PRE-PARSED payloads.
+///
+/// Shared-compute entrypoint: the export path parses every row's
+/// `parsed_payload_json` once and hands the results down instead of each
+/// runner re-parsing the same JSON from scratch.
+pub fn run_motion_feature_report_from_parsed_payloads(
     decoded_rows: &[DecodedFrameRow],
+    parsed_payloads: &[Option<ParsedPayload>],
     correlation: &CaptureCorrelationReport,
     options: MotionFeatureOptions,
 ) -> GooseResult<MotionFeatureReport> {
+    debug_assert_eq!(
+        decoded_rows.len(),
+        parsed_payloads.len(),
+        "parsed payloads must align with decoded rows"
+    );
     let trusted_frames =
         trusted_frames_for_summary_kinds(correlation, &["raw_motion_k10", "raw_motion_k21"]);
     let mut issues = Vec::new();
@@ -1306,8 +1343,8 @@ pub fn run_motion_feature_report(
 
     let mut candidate_frame_count = 0;
     let mut features = Vec::new();
-    for row in decoded_rows {
-        let Some(plan) = motion_plan_from_row(row)? else {
+    for (row, parsed_payload) in decoded_rows.iter().zip(parsed_payloads.iter()) {
+        let Some(plan) = motion_plan_from_parsed(parsed_payload) else {
             continue;
         };
         candidate_frame_count += 1;
@@ -1342,6 +1379,20 @@ pub fn run_motion_feature_report(
     })
 }
 
+pub fn run_motion_feature_report(
+    decoded_rows: &[DecodedFrameRow],
+    correlation: &CaptureCorrelationReport,
+    options: MotionFeatureOptions,
+) -> GooseResult<MotionFeatureReport> {
+    let parsed_payloads = parse_payloads_for_rows(decoded_rows)?;
+    run_motion_feature_report_from_parsed_payloads(
+        decoded_rows,
+        &parsed_payloads,
+        correlation,
+        options,
+    )
+}
+
 pub fn run_heart_rate_feature_report_for_store(
     store: &GooseStore,
     database_path: &str,
@@ -1363,11 +1414,22 @@ pub fn run_heart_rate_feature_report_for_store(
     run_heart_rate_feature_report(&decoded_rows, &correlation, options)
 }
 
-pub fn run_heart_rate_feature_report(
+/// Pure heart-rate core over PRE-PARSED payloads.
+///
+/// Shared-compute entrypoint: the export path parses every row's
+/// `parsed_payload_json` once and hands the results down instead of each
+/// runner re-parsing the same JSON from scratch.
+pub fn run_heart_rate_feature_report_from_parsed_payloads(
     decoded_rows: &[DecodedFrameRow],
+    parsed_payloads: &[Option<ParsedPayload>],
     correlation: &CaptureCorrelationReport,
     options: HeartRateFeatureOptions,
 ) -> GooseResult<HeartRateFeatureReport> {
+    debug_assert_eq!(
+        decoded_rows.len(),
+        parsed_payloads.len(),
+        "parsed payloads must align with decoded rows"
+    );
     let trusted_frames =
         trusted_frames_for_summary_kinds(correlation, &["normal_history", "raw_motion_k10"]);
     let mut issues = Vec::new();
@@ -1377,8 +1439,8 @@ pub fn run_heart_rate_feature_report(
 
     let mut candidate_frame_count = 0;
     let mut features = Vec::new();
-    for row in decoded_rows {
-        let Some(plan) = heart_rate_plan_from_row(row)? else {
+    for (row, parsed_payload) in decoded_rows.iter().zip(parsed_payloads.iter()) {
+        let Some(plan) = heart_rate_plan_from_parsed(parsed_payload) else {
             continue;
         };
         candidate_frame_count += 1;
@@ -1410,6 +1472,20 @@ pub fn run_heart_rate_feature_report(
         issues,
         next_actions,
     })
+}
+
+pub fn run_heart_rate_feature_report(
+    decoded_rows: &[DecodedFrameRow],
+    correlation: &CaptureCorrelationReport,
+    options: HeartRateFeatureOptions,
+) -> GooseResult<HeartRateFeatureReport> {
+    let parsed_payloads = parse_payloads_for_rows(decoded_rows)?;
+    run_heart_rate_feature_report_from_parsed_payloads(
+        decoded_rows,
+        &parsed_payloads,
+        correlation,
+        options,
+    )
 }
 
 pub fn run_vital_event_feature_report_for_store(
@@ -1757,11 +1833,22 @@ pub fn run_temperature_capture_validation_for_store(
     })
 }
 
-pub fn run_vital_event_feature_report(
+/// Pure vital-event core over PRE-PARSED payloads.
+///
+/// Shared-compute entrypoint: the export path parses every row's
+/// `parsed_payload_json` once and hands the results down instead of each
+/// runner re-parsing the same JSON from scratch.
+pub fn run_vital_event_feature_report_from_parsed_payloads(
     decoded_rows: &[DecodedFrameRow],
+    parsed_payloads: &[Option<ParsedPayload>],
     correlation: &CaptureCorrelationReport,
     options: VitalEventFeatureOptions,
 ) -> GooseResult<VitalEventFeatureReport> {
+    debug_assert_eq!(
+        decoded_rows.len(),
+        parsed_payloads.len(),
+        "parsed payloads must align with decoded rows"
+    );
     let trusted_frames = trusted_frames_for_summary_kinds(
         correlation,
         &["event_temperature_level", "normal_history"],
@@ -1777,25 +1864,24 @@ pub fn run_vital_event_feature_report(
     let mut features = Vec::new();
     let mut skin_temperature_inputs = Vec::new();
     let mut respiratory_rate_inputs = Vec::new();
-    for row in decoded_rows {
-        let parsed_payload = parsed_payload_from_row(row)?;
-        if let Some(ParsedPayload::DataPacket { packet_k, .. }) = &parsed_payload {
+    for (row, parsed_payload) in decoded_rows.iter().zip(parsed_payloads.iter()) {
+        if let Some(ParsedPayload::DataPacket { packet_k, .. }) = parsed_payload {
             data_packet_frame_count += 1;
             if matches!(packet_k, Some(25 | 26)) {
                 pulse_information_packet_count += 1;
             }
         }
 
-        if let Some(plan) = vital_event_plan_from_payload(&parsed_payload) {
+        if let Some(plan) = vital_event_plan_from_payload(parsed_payload) {
             candidate_frame_count += 1;
             features.push(vital_event_feature_from_plan(row, plan, &trusted_frames)?);
         }
-        if let Some(plan) = skin_temperature_plan_from_payload(&parsed_payload) {
+        if let Some(plan) = skin_temperature_plan_from_payload(parsed_payload) {
             if let Some(feature) = skin_temperature_feature_from_plan(row, plan, &trusted_frames)? {
                 skin_temperature_inputs.push(feature);
             }
         }
-        if let Some(plan) = respiratory_rate_plan_from_payload(&parsed_payload) {
+        if let Some(plan) = respiratory_rate_plan_from_payload(parsed_payload) {
             if let Some(feature) = respiratory_rate_feature_from_plan(row, plan, &trusted_frames)? {
                 respiratory_rate_inputs.push(feature);
             }
@@ -1849,6 +1935,20 @@ pub fn run_vital_event_feature_report(
         issues,
         next_actions,
     })
+}
+
+pub fn run_vital_event_feature_report(
+    decoded_rows: &[DecodedFrameRow],
+    correlation: &CaptureCorrelationReport,
+    options: VitalEventFeatureOptions,
+) -> GooseResult<VitalEventFeatureReport> {
+    let parsed_payloads = parse_payloads_for_rows(decoded_rows)?;
+    run_vital_event_feature_report_from_parsed_payloads(
+        decoded_rows,
+        &parsed_payloads,
+        correlation,
+        options,
+    )
 }
 
 pub fn run_hrv_feature_report_for_store(
@@ -1958,13 +2058,24 @@ pub fn run_hrv_capture_validation_for_store(
     })
 }
 
-pub fn run_hrv_feature_report(
+/// Pure HRV core over PRE-PARSED payloads.
+///
+/// Shared-compute entrypoint: the export path parses every row's
+/// `parsed_payload_json` once and hands the results down instead of each
+/// runner re-parsing the same JSON from scratch.
+pub fn run_hrv_feature_report_from_parsed_payloads(
     decoded_rows: &[DecodedFrameRow],
+    parsed_payloads: &[Option<ParsedPayload>],
     correlation: &CaptureCorrelationReport,
     start: &str,
     end: &str,
     options: HrvFeatureOptions,
 ) -> GooseResult<HrvFeatureReport> {
+    debug_assert_eq!(
+        decoded_rows.len(),
+        parsed_payloads.len(),
+        "parsed payloads must align with decoded rows"
+    );
     let trusted_frames =
         trusted_frames_for_summary_kinds(correlation, &["r17_optical_or_labrador_filtered"]);
     let mut issues = Vec::new();
@@ -1974,8 +2085,8 @@ pub fn run_hrv_feature_report(
 
     let mut candidate_frame_count = 0;
     let mut features = Vec::new();
-    for row in decoded_rows {
-        let Some(plan) = hrv_plan_from_row(row)? else {
+    for (row, parsed_payload) in decoded_rows.iter().zip(parsed_payloads.iter()) {
+        let Some(plan) = hrv_plan_from_parsed(parsed_payload) else {
             continue;
         };
         candidate_frame_count += 1;
@@ -2071,6 +2182,24 @@ pub fn run_hrv_feature_report(
         issues,
         next_actions,
     })
+}
+
+pub fn run_hrv_feature_report(
+    decoded_rows: &[DecodedFrameRow],
+    correlation: &CaptureCorrelationReport,
+    start: &str,
+    end: &str,
+    options: HrvFeatureOptions,
+) -> GooseResult<HrvFeatureReport> {
+    let parsed_payloads = parse_payloads_for_rows(decoded_rows)?;
+    run_hrv_feature_report_from_parsed_payloads(
+        decoded_rows,
+        &parsed_payloads,
+        correlation,
+        start,
+        end,
+        options,
+    )
 }
 
 pub fn run_recovery_sensor_discovery_report_for_store(
@@ -4217,14 +4346,7 @@ fn issue_reason(issue: &str) -> &'static str {
     }
 }
 
-fn motion_plan_from_row(row: &DecodedFrameRow) -> GooseResult<Option<MotionPlan>> {
-    let parsed_payload: Option<ParsedPayload> = serde_json::from_str(&row.parsed_payload_json)
-        .map_err(|error| {
-            GooseError::message(format!(
-                "{} parsed_payload_json invalid: {error}",
-                row.frame_id
-            ))
-        })?;
+fn motion_plan_from_parsed(parsed_payload: &Option<ParsedPayload>) -> Option<MotionPlan> {
     let Some(ParsedPayload::DataPacket {
         timestamp_seconds,
         timestamp_subseconds,
@@ -4232,36 +4354,37 @@ fn motion_plan_from_row(row: &DecodedFrameRow) -> GooseResult<Option<MotionPlan>
         ..
     }) = parsed_payload
     else {
-        return Ok(None);
+        return None;
     };
 
-    Ok(match body_summary {
+    // The shared parse is borrowed, so the small owned plan inputs are
+    // cloned here; still far cheaper than a per-runner serde_json parse.
+    match body_summary {
         DataPacketBodySummary::RawMotionK10 {
             heart_rate,
             axes,
             warnings,
         } => Some(MotionPlan {
             body_summary_kind: "raw_motion_k10",
-            axes,
-            heart_rate_bpm: heart_rate,
-            device_timestamp_seconds: timestamp_seconds,
-            device_timestamp_subseconds: timestamp_subseconds,
-            summary_warnings: warnings,
+            axes: axes.clone(),
+            heart_rate_bpm: *heart_rate,
+            device_timestamp_seconds: *timestamp_seconds,
+            device_timestamp_subseconds: *timestamp_subseconds,
+            summary_warnings: warnings.clone(),
         }),
         DataPacketBodySummary::RawMotionK21 { axes, warnings, .. } => Some(MotionPlan {
             body_summary_kind: "raw_motion_k21",
-            axes,
+            axes: axes.clone(),
             heart_rate_bpm: None,
-            device_timestamp_seconds: timestamp_seconds,
-            device_timestamp_subseconds: timestamp_subseconds,
-            summary_warnings: warnings,
+            device_timestamp_seconds: *timestamp_seconds,
+            device_timestamp_subseconds: *timestamp_subseconds,
+            summary_warnings: warnings.clone(),
         }),
         _ => None,
-    })
+    }
 }
 
-fn heart_rate_plan_from_row(row: &DecodedFrameRow) -> GooseResult<Option<HeartRatePlan>> {
-    let parsed_payload = parsed_payload_from_row(row)?;
+fn heart_rate_plan_from_parsed(parsed_payload: &Option<ParsedPayload>) -> Option<HeartRatePlan> {
     let Some(ParsedPayload::DataPacket {
         timestamp_seconds,
         timestamp_subseconds,
@@ -4269,10 +4392,10 @@ fn heart_rate_plan_from_row(row: &DecodedFrameRow) -> GooseResult<Option<HeartRa
         ..
     }) = parsed_payload
     else {
-        return Ok(None);
+        return None;
     };
 
-    Ok(match body_summary {
+    match body_summary {
         DataPacketBodySummary::NormalHistory {
             marker_offset: Some(marker_offset),
             marker_value: Some(marker_value),
@@ -4281,10 +4404,10 @@ fn heart_rate_plan_from_row(row: &DecodedFrameRow) -> GooseResult<Option<HeartRa
             body_summary_kind: "normal_history",
             source_signal: "normal_history_hr_marker",
             quality_flag: "preliminary_normal_history_hr_marker",
-            marker_offset,
-            marker_value,
-            device_timestamp_seconds: timestamp_seconds,
-            device_timestamp_subseconds: timestamp_subseconds,
+            marker_offset: *marker_offset,
+            marker_value: *marker_value,
+            device_timestamp_seconds: *timestamp_seconds,
+            device_timestamp_subseconds: *timestamp_subseconds,
         }),
         DataPacketBodySummary::RawMotionK10 {
             heart_rate: Some(heart_rate),
@@ -4294,12 +4417,12 @@ fn heart_rate_plan_from_row(row: &DecodedFrameRow) -> GooseResult<Option<HeartRa
             source_signal: "raw_motion_k10_heart_rate",
             quality_flag: "preliminary_raw_motion_k10_heart_rate",
             marker_offset: 0,
-            marker_value: heart_rate,
-            device_timestamp_seconds: timestamp_seconds,
-            device_timestamp_subseconds: timestamp_subseconds,
+            marker_value: *heart_rate,
+            device_timestamp_seconds: *timestamp_seconds,
+            device_timestamp_subseconds: *timestamp_subseconds,
         }),
         _ => None,
-    })
+    }
 }
 
 fn parsed_payload_from_row(row: &DecodedFrameRow) -> GooseResult<Option<ParsedPayload>> {
@@ -4408,14 +4531,7 @@ fn respiratory_rate_plan_from_payload(
     }
 }
 
-fn hrv_plan_from_row(row: &DecodedFrameRow) -> GooseResult<Option<HrvPlan>> {
-    let parsed_payload: Option<ParsedPayload> = serde_json::from_str(&row.parsed_payload_json)
-        .map_err(|error| {
-            GooseError::message(format!(
-                "{} parsed_payload_json invalid: {error}",
-                row.frame_id
-            ))
-        })?;
+fn hrv_plan_from_parsed(parsed_payload: &Option<ParsedPayload>) -> Option<HrvPlan> {
     let Some(ParsedPayload::DataPacket {
         body_summary:
             Some(DataPacketBodySummary::R17OpticalOrLabradorFiltered {
@@ -4428,15 +4544,15 @@ fn hrv_plan_from_row(row: &DecodedFrameRow) -> GooseResult<Option<HrvPlan>> {
         ..
     }) = parsed_payload
     else {
-        return Ok(None);
+        return None;
     };
 
-    Ok(Some(HrvPlan {
-        samples,
-        flags,
-        sample_count,
-        summary_warnings: warnings,
-    }))
+    Some(HrvPlan {
+        samples: samples.clone(),
+        flags: *flags,
+        sample_count: *sample_count,
+        summary_warnings: warnings.clone(),
+    })
 }
 
 fn motion_feature_from_plan(
