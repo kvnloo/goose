@@ -7,7 +7,8 @@ use crate::{
     GooseError, GooseResult,
     capture_correlation::{
         CaptureCorrelationOptions, CaptureCorrelationReport,
-        DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY, run_capture_correlation_for_store,
+        DEFAULT_MIN_OWNED_CAPTURES_PER_SUMMARY,
+        run_capture_correlation_for_rows_with_parsed_payloads, run_capture_correlation_for_store,
     },
     metrics::{
         AlgorithmRunResult, GOOSE_HRV_V0_ID, GOOSE_HRV_V0_VERSION, HrvInput, HrvOutput,
@@ -1132,13 +1133,25 @@ pub fn load_metric_feature_export_context(
 ) -> GooseResult<MetricFeatureExportContext> {
     let decoded_rows = store.decoded_frames_between(start, end)?;
     let parsed_payloads = parse_payloads_for_rows(&decoded_rows)?;
-    let correlation = run_capture_correlation_for_store(
-        store,
+    // The correlation pass now runs over the shared parse: it used to
+    // re-fetch both row sets and re-parse every payload inside
+    // run_capture_correlation_for_store. The raw fetch moves here so the
+    // store is read exactly once per table; row content is identical either
+    // way (same store, no mutation between the two reads).
+    let raw_rows = store.raw_evidence_between(start, end)?;
+    // Ordering note: parse_payloads_for_rows hard-errors on the first
+    // invalid payload in row order with the per-row parsers' message, and
+    // it runs before this pass, so the correlation soft-error branch for
+    // invalid payloads is unreachable here. That preserves the base
+    // behavior, where the motion runner was the first to parse and
+    // hard-error on exactly that message.
+    let correlation = run_capture_correlation_for_rows_with_parsed_payloads(
         database_path,
-        start,
-        end,
+        &raw_rows,
+        &decoded_rows,
+        &parsed_payloads,
         correlation_options,
-    )?;
+    );
     Ok(MetricFeatureExportContext {
         decoded_rows,
         parsed_payloads,

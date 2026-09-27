@@ -218,6 +218,61 @@ pub fn run_capture_correlation_for_rows(
         push_decoded_frame_observation(&mut observations, raw, row, parsed_payload.as_ref());
     }
 
+    finish_capture_correlation_report(evidence_scope, observations, issues, &options)
+}
+
+/// Rows-level correlation over PRE-PARSED payloads.
+///
+/// Shared-compute entrypoint: the export path parses every row's
+/// `parsed_payload_json` once and hands the results down instead of the
+/// correlation pass re-parsing the same JSON from scratch. `parsed_payloads`
+/// must align with `decoded_rows` (the same `Option<ParsedPayload>` shape the
+/// per-row parse in `run_capture_correlation_for_rows` produces); rows with
+/// invalid payloads never reach here because the shared parse hard-errors
+/// first with the per-row parsers' message.
+pub fn run_capture_correlation_for_rows_with_parsed_payloads(
+    evidence_scope: &str,
+    raw_rows: &[RawEvidenceRow],
+    decoded_rows: &[DecodedFrameRow],
+    parsed_payloads: &[Option<ParsedPayload>],
+    options: CaptureCorrelationOptions,
+) -> CaptureCorrelationReport {
+    debug_assert_eq!(
+        decoded_rows.len(),
+        parsed_payloads.len(),
+        "parsed payloads must align with decoded rows"
+    );
+    let mut observations = Vec::new();
+    let mut issues = Vec::new();
+
+    if options.min_owned_captures_per_summary == 0 {
+        issues.push("min_owned_captures_per_summary must be greater than zero".to_string());
+    }
+
+    let raw_by_id = raw_rows
+        .iter()
+        .map(|row| (row.evidence_id.as_str(), row))
+        .collect::<BTreeMap<_, _>>();
+    for (row, parsed_payload) in decoded_rows.iter().zip(parsed_payloads.iter()) {
+        let Some(raw) = raw_by_id.get(row.evidence_id.as_str()) else {
+            issues.push(format!(
+                "{} decoded frame has no raw evidence row {}",
+                row.frame_id, row.evidence_id
+            ));
+            continue;
+        };
+        push_decoded_frame_observation(&mut observations, raw, row, parsed_payload.as_ref());
+    }
+
+    finish_capture_correlation_report(evidence_scope, observations, issues, &options)
+}
+
+fn finish_capture_correlation_report(
+    evidence_scope: &str,
+    observations: Vec<CaptureCorrelationObservation>,
+    mut issues: Vec<String>,
+    options: &CaptureCorrelationOptions,
+) -> CaptureCorrelationReport {
     if observations.is_empty() {
         issues.push("no packet/event summaries found for capture correlation".to_string());
     }
@@ -229,7 +284,7 @@ pub fn run_capture_correlation_for_rows(
         &mut issues,
     );
     let next_capture_actions =
-        report_next_capture_actions(&summaries, observations.is_empty(), &options);
+        report_next_capture_actions(&summaries, observations.is_empty(), options);
 
     CaptureCorrelationReport {
         schema: CAPTURE_CORRELATION_REPORT_SCHEMA.to_string(),
